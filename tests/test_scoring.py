@@ -66,7 +66,11 @@ def test_identify_respects_top_k(gallery):
 def test_uncalibrated_results_say_so(gallery):
     _, base = cluster(seed=1)
     assert scoring.identify(base, gallery).calibrated is False
+    # Identification is only calibrated once the identification threshold is set;
+    # a verification threshold alone is a fallback, not a calibration.
     gallery.threshold = 0.5
+    assert scoring.identify(base, gallery).calibrated is False
+    gallery.identification_threshold = 0.5
     assert scoring.identify(base, gallery).calibrated is True
 
 
@@ -112,10 +116,11 @@ def test_threshold_for_far_bounds_false_accepts():
 
 
 def test_collect_trial_scores_is_leave_one_out(gallery):
-    target, impostor = scoring.collect_trial_scores(gallery)
-    assert target.size == 6 * 4          # every take against the other three
-    assert impostor.size == 6 * 4 * 5    # every take against every other speaker
-    assert target.mean() > impostor.mean()
+    trials = scoring.collect_trial_scores(gallery)
+    assert trials.target.size == 6 * 4          # every take against the other three
+    assert trials.impostor.size == 6 * 4 * 5    # every take against every other speaker
+    assert trials.impostor_best.size == 6 * 4   # one best-match score per take
+    assert trials.target.mean() > trials.impostor.mean()
 
 
 def test_calibrate_separates_and_sets_a_usable_threshold(gallery):
@@ -184,3 +189,50 @@ def test_a_healthy_calibration_is_usable(gallery):
     result = scoring.calibrate(gallery)
     assert result.usable
     assert result.warnings == []
+
+
+# --------------------------------------------------------------------------- #
+# Verification vs identification thresholds
+# --------------------------------------------------------------------------- #
+
+def test_best_match_impostor_scores_exceed_pairwise_ones(gallery):
+    """The max over N speakers sits above a single pairwise draw -- that is the
+    whole reason identification needs its own threshold."""
+    trials = scoring.collect_trial_scores(gallery)
+    assert trials.impostor_best.size > 0
+    assert trials.impostor_best.mean() > trials.impostor.mean()
+    assert trials.impostor_best.max() >= trials.impostor.max() - 1e-9
+
+
+def test_identification_threshold_is_at_least_the_verification_one(gallery):
+    result = scoring.calibrate(gallery)
+    assert result.identification_threshold >= result.threshold - 1e-9
+    assert np.isfinite(result.identification_eer)
+
+
+def test_identify_uses_the_identification_threshold(gallery):
+    """A gallery with both thresholds set must not judge with the pairwise one."""
+    gallery.threshold = -1.0                 # would accept anything
+    gallery.identification_threshold = 0.99  # accepts almost nothing
+    _, stranger = cluster(seed=987)
+    assert scoring.identify(stranger, gallery).decision == "unknown"
+
+    gallery.identification_threshold = -1.0
+    assert scoring.identify(stranger, gallery).accepted
+
+
+def test_verify_still_uses_the_pairwise_threshold(gallery):
+    """Verification is 1-to-1; the identification threshold must not leak into it."""
+    gallery.threshold = -1.0
+    gallery.identification_threshold = 0.99
+    _, base = cluster(seed=2)
+    assert scoring.verify(base, gallery, "spk2").accepted
+
+
+def test_a_schema_1_gallery_falls_back_to_its_single_threshold(gallery):
+    """Galleries written before the split have no identification threshold."""
+    gallery.threshold = 0.5
+    gallery.identification_threshold = None
+    result = scoring.identify(cluster(seed=2)[1], gallery)
+    assert result.threshold == 0.5
+    assert result.calibrated is False, "a fallback threshold must not claim to be calibrated"

@@ -21,7 +21,7 @@ import numpy as np
 from .encoders.base import EncoderSpec, average_embeddings, l2_normalize
 from .normalization import EmbeddingStandardizer, load_default_reference
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,63}$")
 
 
@@ -179,11 +179,17 @@ class Gallery:
         *,
         require_consent: bool = True,
         threshold: float | None = None,
+        identification_threshold: float | None = None,
     ):
         self.spec = spec
         self.prints: dict[str, VoicePrint] = {}
         self.require_consent = require_consent
+        #: Threshold for 1-to-1 verification.
         self.threshold = threshold
+        #: Threshold for 1-to-N identification. Higher, because the score being
+        #: tested is a maximum over every enrolled speaker -- see
+        #: :mod:`voxprint.scoring`.
+        self.identification_threshold = identification_threshold
         self.standardizer = standardizer or load_default_reference(spec)
         self.created_at = _now()
 
@@ -336,6 +342,7 @@ class Gallery:
             "created_at": self.created_at,
             "saved_at": _now(),
             "threshold": self.threshold,
+            "identification_threshold": self.identification_threshold,
             "require_consent": self.require_consent,
             "standardizer": self.standardizer.describe(),
             "speakers": [],
@@ -390,6 +397,9 @@ class Gallery:
                 standardizer=standardizer,
                 require_consent=bool(manifest.get("require_consent", True)),
                 threshold=manifest.get("threshold"),
+                # Absent in schema 1: such a gallery falls back to the
+                # verification threshold, which is what it was using anyway.
+                identification_threshold=manifest.get("identification_threshold"),
             )
             gallery.created_at = str(manifest.get("created_at", _now()))
 
@@ -418,6 +428,7 @@ class Gallery:
             "utterances": sum(p.n_utterances for p in self.prints.values()),
             "total_seconds": round(sum(p.total_seconds for p in self.prints.values()), 2),
             "threshold": self.threshold,
+            "identification_threshold": self.identification_threshold,
             "standardizer": self.standardizer.describe(),
             "require_consent": self.require_consent,
         }

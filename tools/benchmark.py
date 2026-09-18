@@ -131,7 +131,12 @@ def bench_refit(encoder_name: str, n_speakers: int, n_strangers: int, seconds: f
 
 
 def bench_conversion() -> dict:
-    """How far the signal-processing converter actually moves the voice print."""
+    """How far the signal-processing converter actually moves the voice print.
+
+    Measured as a contrast (target similarity minus source similarity), because
+    absolute cosines shift with whichever reference population the standardiser
+    was fitted on.
+    """
     from voxprint.synth import get_synth
 
     enc = get_encoder("dsp")
@@ -144,9 +149,10 @@ def bench_conversion() -> dict:
     embed = lambda w: std.transform(enc.embed(w, SR))  # noqa: E731
     e_src, e_tgt, e_out = embed(source), embed(target), embed(out)
     return {
-        "before": float(e_src @ e_tgt),
-        "after": float(e_out @ e_tgt),
-        "drift_from_source": float(e_out @ e_src),
+        "contrast_before": float(e_src @ e_tgt) - 1.0,
+        "contrast_after": float(e_out @ e_tgt) - float(e_out @ e_src),
+        "to_target": float(e_out @ e_tgt),
+        "to_source": float(e_out @ e_src),
     }
 
 
@@ -208,10 +214,11 @@ def main() -> int:
                       f"{row['false_accepts']:>10}/{row['strangers']}")
 
     if "conversion" not in args.skip:
-        section("Signal-processing voice conversion (similarity to the target)")
+        section("Signal-processing voice conversion")
         r = bench_conversion()
-        print(f"  before {r['before']:+.3f}  ->  after {r['after']:+.3f}  "
-              f"(drift from source {r['drift_from_source']:+.3f})")
+        print(f"  contrast (target - source):  {r['contrast_before']:+.3f} before  ->  "
+              f"{r['contrast_after']:+.3f} after   (gain {r['contrast_after'] - r['contrast_before']:+.3f})")
+        print(f"  output similarity: {r['to_target']:+.3f} to the target, {r['to_source']:+.3f} to the source")
 
     if "watermark" not in args.skip:
         section("Watermark detection margin")

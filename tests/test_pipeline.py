@@ -209,3 +209,14 @@ def test_unusable_calibration_leaves_the_threshold_alone(tmp_path, clips):
     assert not result.usable
     assert lab.gallery.threshold is None
     assert lab.identify_file(clips["omar"][3]).calibrated is False
+
+
+def test_robust_calibration_is_reproducible(tmp_path, clips):
+    """`hash()` is salted per process; a calibration must not depend on it."""
+    thresholds = []
+    for run in range(2):
+        lab = VoiceLab(tmp_path / f"voices{run}")
+        for name in ("omar", "hana", "sami"):
+            lab.enroll(name, clips[name][:2], consent=CONSENT)
+        thresholds.append(lab.calibrate(robust=True).threshold)
+    assert thresholds[0] == pytest.approx(thresholds[1])

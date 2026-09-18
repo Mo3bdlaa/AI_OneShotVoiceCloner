@@ -5,6 +5,31 @@ match is still *not good enough* -- an open-set system must be able to answer
 "nobody I know". That decision is a threshold, and a threshold that has not been
 calibrated against real scores is a guess. :func:`calibrate` turns the enrolled
 data itself into a calibration set, so the number comes from measurement.
+
+Two thresholds, not one
+-----------------------
+Verification (1-to-1) and identification (1-to-N) need *different* thresholds,
+and using one for the other fails in a way that looks like an encoder problem.
+
+Verification compares one score against one claim, so the relevant impostor
+distribution is pairwise. Identification takes the **maximum** over N enrolled
+speakers, and the maximum of N draws sits far above a single draw. Measured on
+30 real speakers from LibriSpeech: the pairwise impostor score averages -0.020,
+while an unenrolled speaker's *best match* over those 30 averages +0.354 -- a
+shift of +0.374. A pairwise equal-error threshold of 0.158 therefore admitted
+49 of 50 strangers, even though the same threshold was well calibrated for
+verification.
+
+So :func:`calibrate` measures both: pairwise trials for
+:attr:`CalibrationResult.threshold`, and a leave-one-speaker-out best-match
+distribution -- each enrolled speaker scored against the gallery *without*
+themselves, which is exactly what a stranger faces -- for
+:attr:`CalibrationResult.identification_threshold`. :func:`identify` uses the
+second, :func:`verify` the first.
+
+One consequence worth knowing: the identification threshold depends on how many
+speakers are enrolled, because the maximum is over more candidates. Recalibrate
+after the gallery grows substantially.
 """
 
 from __future__ import annotations
@@ -112,12 +137,19 @@ def identify(
 ) -> IdentifyResult:
     """Search the gallery for the speaker of ``query``.
 
+    Uses the gallery's *identification* threshold, which is calibrated against
+    best-match impostor scores rather than pairwise ones -- see the module
+    docstring for why the two differ and what happens when they are confused.
+
     ``min_margin`` guards against the case where two enrolled speakers both score
     above threshold and are nearly tied: confidently naming either would be
     wrong, so the result is reported as ambiguous instead.
     """
-    calibrated = threshold is not None or gallery.threshold is not None
-    thr = threshold if threshold is not None else (gallery.threshold or DEFAULT_THRESHOLD)
+    gallery_threshold = gallery.identification_threshold
+    if gallery_threshold is None:
+        gallery_threshold = gallery.threshold
+    calibrated = threshold is not None or gallery.identification_threshold is not None
+    thr = threshold if threshold is not None else (gallery_threshold if gallery_threshold is not None else DEFAULT_THRESHOLD)
 
     ids, centroids = gallery.centroid_matrix(standardize=True)
     if not ids:
@@ -185,8 +217,13 @@ class CalibrationResult:
     eer: float
     n_target: int
     n_impostor: int
+    #: Threshold for 1-to-N identification, from the best-match impostor
+    #: distribution. Higher than :attr:`threshold`, often much higher.
+    identification_threshold: float = DEFAULT_THRESHOLD
+    identification_eer: float = float("nan")
     target_scores: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
     impostor_scores: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
+    impostor_best_scores: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
     criterion: str = "eer"
     #: Problems that make the threshold untrustworthy, e.g. no same-speaker
     #: trials because every speaker has a single enrolment take.
@@ -220,6 +257,8 @@ class CalibrationResult:
             "usable": self.usable,
             "warnings": list(self.warnings),
             "threshold": round(self.threshold, 4),
+            "identification_threshold": round(self.identification_threshold, 4),
+            "identification_eer": _finite(self.identification_eer),
             # NaN is not valid JSON -- Python emits a bare `NaN` token that
             # JSON.parse and most strict parsers reject, so a browser client
             # would fail on the whole response rather than on one field.
@@ -228,6 +267,7 @@ class CalibrationResult:
             "frr_at_threshold": None if np.isnan(frr) else round(frr, 4),
             "target_pairs": self.n_target,
             "impostor_pairs": self.n_impostor,
+            "best_match_impostor_trials": int(self.impostor_best_scores.size),
             "target_score_mean": round(float(self.target_scores.mean()), 4) if self.n_target else None,
             "impostor_score_mean": round(float(self.impostor_scores.mean()), 4) if self.n_impostor else None,
             "conditions": list(self.conditions),
@@ -239,27 +279,54 @@ def _finite(value: float, digits: int = 4) -> float | None:
     return round(float(value), digits) if np.isfinite(value) else None
 
 
-def collect_trial_scores(gallery: Gallery) -> tuple[np.ndarray, np.ndarray]:
+@dataclass(frozen=True)
+class TrialScores:
+    """The three score sets a calibration needs."""
+
+    #: Same-speaker scores, leave-one-out against the speaker's own centroid.
+    target: np.ndarray
+    #: Every cross-speaker pair -- the verification impostor distribution.
+    impostor: np.ndarray
+    #: Per utterance, the *best* score against any other speaker. This is what an
+    #: unenrolled voice actually faces during identification, and it sits far
+    #: above the pairwise distribution once the gallery holds more than a handful
+    #: of people.
+    impostor_best: np.ndarray
+
+
+def collect_trial_scores(gallery: Gallery) -> TrialScores:
     """Build target and impostor score sets from the gallery itself.
 
     Target scores use leave-one-out: each utterance is scored against the
     centroid of that speaker's *remaining* utterances. Scoring it against a
     centroid it helped compute would inflate the target distribution and push the
     calibrated threshold far too high.
+
+    ``impostor_best`` applies the same idea to the open-set question: each
+    utterance is scored against every *other* speaker's centroid and the maximum
+    kept, which simulates that speaker arriving as a stranger.
     """
     labels, vectors = gallery.all_utterances(standardize=True)
+    empty = np.zeros(0)
     if not labels:
-        return np.zeros(0), np.zeros(0)
+        return TrialScores(empty, empty, empty)
 
     by_speaker: dict[str, list[int]] = {}
     for idx, sid in enumerate(labels):
         by_speaker.setdefault(sid, []).append(idx)
 
+    centroids = {
+        sid: average_embeddings(np.stack([vectors[i] for i in idxs]))
+        for sid, idxs in by_speaker.items()
+    }
+
     target: list[float] = []
     impostor: list[float] = []
+    impostor_best: list[float] = []
 
     for sid, idxs in by_speaker.items():
         others = {o: np.stack([vectors[i] for i in oi]) for o, oi in by_speaker.items() if o != sid}
+        other_centroids = np.stack([centroids[o] for o in others]) if others else np.zeros((0, vectors.shape[1]))
         for i in idxs:
             rest = [j for j in idxs if j != i]
             if rest:
@@ -267,8 +334,10 @@ def collect_trial_scores(gallery: Gallery) -> tuple[np.ndarray, np.ndarray]:
                 target.append(float(np.dot(vectors[i], loo_centroid)))
             for mat in others.values():
                 impostor.append(float(np.dot(mat, vectors[i]).mean()))
+            if other_centroids.shape[0]:
+                impostor_best.append(float(np.max(other_centroids @ vectors[i])))
 
-    return np.asarray(target), np.asarray(impostor)
+    return TrialScores(np.asarray(target), np.asarray(impostor), np.asarray(impostor_best))
 
 
 def equal_error_rate(target: np.ndarray, impostor: np.ndarray) -> tuple[float, float]:
@@ -316,7 +385,8 @@ def calibrate(gallery: Gallery, *, criterion: str = "eer", max_far: float = 0.01
     so the true false-accept rate in deployment is higher than the number
     reported here. Treat it as a floor, not a promise.
     """
-    target, impostor = collect_trial_scores(gallery)
+    trials = collect_trial_scores(gallery)
+    target, impostor = trials.target, trials.impostor
     eer, eer_threshold = equal_error_rate(target, impostor)
     if criterion == "eer":
         threshold = eer_threshold
@@ -324,6 +394,16 @@ def calibrate(gallery: Gallery, *, criterion: str = "eer", max_far: float = 0.01
         threshold = threshold_for_far(target, impostor, max_far)
     else:
         raise ValueError(f"unknown calibration criterion {criterion!r}; use 'eer' or 'far'")
+
+    # The identification threshold answers a different question, so it gets its
+    # own distribution: the best match a non-enrolled voice would score.
+    id_eer, id_eer_threshold = equal_error_rate(target, trials.impostor_best)
+    if criterion == "far":
+        id_threshold = threshold_for_far(target, trials.impostor_best, max_far)
+    else:
+        id_threshold = id_eer_threshold
+    if not np.isfinite(id_threshold):
+        id_threshold = threshold
 
     warnings: list[str] = []
     if target.size == 0:
@@ -342,8 +422,11 @@ def calibrate(gallery: Gallery, *, criterion: str = "eer", max_far: float = 0.01
         eer=eer,
         n_target=int(target.size),
         n_impostor=int(impostor.size),
+        identification_threshold=float(id_threshold),
+        identification_eer=id_eer,
         target_scores=target,
         impostor_scores=impostor,
+        impostor_best_scores=trials.impostor_best,
         criterion=criterion,
         warnings=warnings,
     )

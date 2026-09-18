@@ -20,6 +20,7 @@ embedding, unlike a recording, cannot be played back.
 from __future__ import annotations
 
 import os
+import zlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -286,6 +287,7 @@ class VoiceLab:
         # would then report `calibrated: true` for a number nothing measured.
         if result.usable:
             self.gallery.threshold = result.threshold
+            self.gallery.identification_threshold = result.identification_threshold
             self.scaler = PlattScaler.fit(result.target_scores, result.impostor_scores)
             self._maybe_save()
         return result
@@ -309,6 +311,7 @@ class VoiceLab:
         target = [clean.target_scores]
         impostor = [clean.impostor_scores]
         conditions: list[str] = []
+        skipped: list[str] = []
 
         for sid in ids:
             path = self.reference_audio_path(sid)
@@ -319,11 +322,16 @@ class VoiceLab:
             wav = wav[: int(self.encoder.sample_rate * 8.0)]
             for augmentation in suite:
                 try:
-                    degraded = augmentation(wav, sr, seed=abs(hash(sid)) % 10_000)
+                    degraded = augmentation(wav, sr, seed=_stable_seed(sid))
                     vec = self.gallery.standardizer.transform(self.encoder.embed(degraded, sr))
-                except Exception:
-                    # A degradation that destroys the audio is itself informative,
-                    # but it cannot contribute a score; skip rather than fail.
+                except (ValueError, FloatingPointError) as exc:
+                    # A degradation can legitimately destroy a clip -- heavy
+                    # band-limiting on a quiet take leaves too little speech to
+                    # embed. That is worth recording, not worth failing on.
+                    # Anything else is a bug and must not be swallowed: a blanket
+                    # handler here once hid a NameError and silently downgraded
+                    # every robust calibration to a clean one.
+                    skipped.append(f"{sid}/{augmentation.name}: {exc}")
                     continue
                 scores = centroids @ vec
                 own = index[sid]
@@ -338,6 +346,10 @@ class VoiceLab:
         threshold = eer_threshold if criterion == "eer" else threshold_for_far(all_target, all_impostor, max_far)
 
         warnings = list(clean.warnings)
+        if skipped:
+            warnings.append(
+                f"{len(skipped)} degraded trial(s) could not be embedded: {'; '.join(skipped[:3])}"
+            )
         if not conditions:
             warnings.append(
                 "no reference audio stored for any speaker, so no degraded trials could be built; "
@@ -445,6 +457,16 @@ class VoiceLab:
 
     def speakers(self) -> list[VoicePrint]:
         return [self.gallery.prints[i] for i in self.gallery.ids()]
+
+
+def _stable_seed(name: str) -> int:
+    """A per-speaker seed that survives a restart.
+
+    ``hash()`` on a string is salted per interpreter process unless
+    PYTHONHASHSEED is set, so using it here made robust calibration produce a
+    different threshold on every run from identical inputs.
+    """
+    return zlib.crc32(name.encode("utf-8")) % 10_000
 
 
 def _require_ready(synth) -> None:

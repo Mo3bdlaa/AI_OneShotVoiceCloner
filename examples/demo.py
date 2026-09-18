@@ -80,8 +80,18 @@ def main() -> int:
     rule("2. calibration")
     cal = lab.calibrate()
     info = cal.as_dict()
-    print(f"  threshold {info['threshold']}  (equal error rate {info['eer']})")
+    print(f"  verification threshold   {info['threshold']}   (pairwise EER {info['eer']})")
+    print(f"  identification threshold {info['identification_threshold']}   "
+          f"(open-set EER {info['identification_eer']})")
     print(f"  same-speaker mean {info['target_score_mean']}  vs impostor mean {info['impostor_score_mean']}")
+    if info["identification_threshold"] > info["threshold"]:
+        print("  identification needs the higher one: it takes the best of every enrolled score,")
+        print("  and the best of N sits above any single pairwise comparison. The gap grows")
+        print("  with the gallery -- on 30 speakers it was the difference between rejecting")
+        print("  2% of strangers and rejecting 70%.")
+    else:
+        print(f"  the two coincide with only {len(ENROLLED)} speakers enrolled; the identification")
+        print("  threshold rises above the verification one as the gallery grows.")
 
     rule("3. identification of held-out takes")
     for name in ENROLLED:
@@ -94,7 +104,7 @@ def main() -> int:
     result = lab.identify_file(clips[STRANGER][0])
     print(f"  {STRANGER} was never enrolled -> {result.decision} "
           f"(best guess {result.best.speaker_id} at {result.best.score:+.3f}, "
-          f"threshold {result.threshold:.3f})")
+          f"identification threshold {result.threshold:.3f})")
 
     rule("5. voice conversion, measured")
     out_path = os.path.join(args.out, "omar_as_hana.wav")
@@ -108,7 +118,7 @@ def main() -> int:
     print(f"  pitch shifted {converted.info['semitones']:+.1f} semitones "
           f"({converted.info['source_f0']:.0f} Hz -> {converted.info['reference_f0']:.0f} Hz)")
     print(f"  similarity to hana: {before:+.3f} before  ->  {after:+.3f} after "
-          f"(threshold {lab.gallery.threshold:.3f})")
+          f"(identification threshold {lab.gallery.identification_threshold:.3f})")
     print("  the gap narrows but does not close: this is timbre transfer, not identity cloning.")
 
     rule("6. provenance watermark")

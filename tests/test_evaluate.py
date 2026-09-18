@@ -19,9 +19,11 @@ def test_selftest_meets_its_published_numbers():
 
 
 def test_conversion_report_quantifies_the_gap():
+    """Reported as a contrast, since absolute cosines move with the reference."""
     report = conversion_report()
-    assert report["after"] > report["before"]
-    assert report["after"] < 0.8, "DSP conversion is timbre transfer, not identity cloning"
+    assert report["contrast_after"] > report["contrast_before"], "conversion must close some of the gap"
+    assert report["gain"] > 0.3
+    assert report["contrast_after"] < 0.5, "timbre transfer, not identity cloning"
 
 
 def test_distinct_speakers_are_actually_distinct():

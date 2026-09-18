@@ -158,3 +158,37 @@ def test_refit_standardizer_needs_enough_speakers(gallery):
         gallery.enroll(f"s{i}", vecs(3, seed=i), consent=CONSENT)
     assert gallery.refit_standardizer() is True
     assert gallery.standardizer.source == "gallery"
+
+
+def test_both_thresholds_survive_a_save_and_load(tmp_path, gallery):
+    gallery.enroll("alice", vecs(3), consent=CONSENT)
+    gallery.threshold = 0.31
+    gallery.identification_threshold = 0.62
+    gallery.save(tmp_path / "g.npz")
+
+    loaded = Gallery.load(tmp_path / "g.npz")
+    assert loaded.threshold == 0.31
+    assert loaded.identification_threshold == 0.62
+
+
+def test_a_schema_1_gallery_loads_without_an_identification_threshold(tmp_path, gallery, monkeypatch):
+    """Older galleries must still open, with the field simply absent."""
+    gallery.enroll("alice", vecs(2), consent=CONSENT)
+    gallery.threshold = 0.4
+    gallery.save(tmp_path / "g.npz")
+
+    import json
+
+    import numpy as _np
+
+    with _np.load(tmp_path / "g.npz", allow_pickle=False) as data:
+        arrays = {k: data[k] for k in data.files}
+    manifest = json.loads(str(arrays["manifest"].item()))
+    manifest["schema_version"] = 1
+    manifest.pop("identification_threshold", None)
+    arrays["manifest"] = _np.array(json.dumps(manifest))
+    _np.savez_compressed(tmp_path / "old.npz", **arrays)
+
+    loaded = Gallery.load(tmp_path / "old.npz")
+    assert loaded.threshold == 0.4
+    assert loaded.identification_threshold is None

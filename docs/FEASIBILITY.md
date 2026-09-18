@@ -51,27 +51,48 @@ additive in the log domain — but the blocks that carry vocal-tract size cannot
 normalised that way without discarding what they measure. The result is an
 encoder that is strong within one recording setup and weak across two.
 
-### Measured accuracy
+### Measured accuracy on real speech
+
+LibriSpeech `dev-clean`: 30 enrolled speakers, 3 enrolment files each, 150
+held-out queries, 10 speakers held out entirely as strangers. Reproduce with
+`voxprint eval <corpus> --encoder ecapa`.
+
+| encoder | EER (1-to-1) | EER (open-set) | correct | strangers rejected |
+|---|---|---|---|---|
+| `dsp` | 0.131 | 0.333 | 58 % | 88 % |
+| `ecapa` | **0.011** | **0.033** | **100 %** | **100 %** |
+
+This is the number that answers the question. ECAPA's 1.1 % equal error rate is
+the VoxCeleb-class figure, reproduced here rather than cited; on this corpus it
+identified every held-out query correctly and rejected every stranger. The DSP
+encoder gets 58 % — genuinely better than chance across 30 speakers, and
+genuinely not good enough for anything that matters.
+
+Two caveats that cut in opposite directions. LibriSpeech is read audiobook speech
+recorded cleanly, which is *easier* than conversational audio over a phone. And
+the DSP encoder's shipped reference statistics are fitted partly on LibriSpeech
+`dev-other`, a different set of speakers but the same corpus and recording style,
+so its 58 % is its best case for domain match.
+
+### Measured accuracy on synthetic voices
 
 12 enrolled speakers and 12 strangers from one mutually distinct pool, three
 4-second enrolment takes each, held-out queries. Reproduce with
-`python tools/benchmark.py --encoders dsp ecapa`.
+`python tools/benchmark.py`. These are a regression check on the pipeline, not a
+claim about people.
 
-| query | `dsp` rank-1 | `dsp` accepted | `ecapa` rank-1 | `ecapa` accepted |
-|---|---|---|---|---|
-| clean | 100 % | 91.7 % | 100 % | 100 % |
-| 40 dB SNR | 100 % | 2.8 % | 100 % | 41.7 % |
-| 30 dB SNR | 86.1 % | 0 % | 77.8 % | 0 % |
-| 20 dB SNR | 52.8 % | 0 % | 86.1 % | 0 % |
-| 10 dB SNR | 50.0 % | 0 % | 91.7 % | 0 % |
+| query | `dsp` rank-1 | `dsp` accepted |
+|---|---|---|
+| clean | 100 % | 91.7 % |
+| 40 dB SNR | 100 % | 5.6 % |
+| 30 dB SNR | 91.7 % | 0 % |
+| 20 dB SNR | 91.7 % | 0 % |
+| 10 dB SNR | 75.0 % | 0 % |
 
 Read the rank-1 and accepted columns as two separate findings.
 
-**Rank-1 is about the encoder.** ECAPA still ranks the right speaker first 91.7 %
-of the time at 10 dB SNR, where the DSP encoder has fallen to 50 %. That is the
-gap between learning what distinguishes speakers from thousands of labelled
-examples and being told what to measure. And ECAPA is understated here: it was
-trained on real speech, and vowel-only synthetic voices are outside its domain.
+**Rank-1 is about the encoder**, and both encoders hold up: ECAPA still ranks the
+right speaker first 92 % of the time at 10 dB SNR.
 
 **Acceptance is about the threshold.** It collapses to zero for *both* encoders,
 because both were given a threshold from clean-against-clean comparisons and any
@@ -82,6 +103,42 @@ enrolment audio during calibration: measured on five speakers, acceptance at
 equal error rate goes from 0.058 to 0.102. That higher error rate is not a
 regression -- it is what the system's accuracy always was under mismatch, now
 visible instead of hidden behind a threshold nobody could meet.
+
+### Two thresholds, not one
+
+The other measurement that changed the design. Verification asks "is this the
+claimed person?" and compares one score against one claim, so its impostor
+distribution is pairwise. Identification asks "which of these N, if any?" and
+takes the **maximum** over N — and the maximum of N draws sits far above a single
+draw.
+
+On 30 real LibriSpeech speakers: pairwise impostor scores average −0.020, while
+an unenrolled speaker's best match over those 30 averages +0.354. A pairwise
+equal-error threshold of 0.158 therefore admitted **49 of 50 strangers**, despite
+being perfectly well calibrated for the question it was actually answering.
+
+`calibrate` now measures both. The identification threshold comes from a
+leave-one-speaker-out best-match distribution: each enrolled speaker is scored
+against the gallery *without* themselves, which is exactly the situation a
+stranger is in. Switching `identify` to it took stranger rejection from 2 % to
+70 % on that corpus, and accuracy from 67 % to 57 % — a real cost, now visible
+and adjustable instead of hidden behind a broken default.
+
+The identification threshold depends on how many speakers are enrolled, since the
+maximum is over more candidates. Recalibrate after the gallery grows.
+
+### Which reference population to standardise against
+
+Measured on real speech, with everything else held fixed:
+
+| reference population | synthetic margin | real correct | strangers rejected |
+|---|---|---|---|
+| 400 procedural voices | +0.107 | 56.7 % | 60.0 % |
+| 900 LibriSpeech utterances | +0.044 | 56.7 % | 82.0 % |
+| both pooled | +0.081 | 58.0 % | 88.0 % |
+
+Neither source alone is right — each is out of domain for the other — and pooling
+beats both on their own ground. The shipped reference is the pooled one.
 
 ### A note on the fixture itself
 

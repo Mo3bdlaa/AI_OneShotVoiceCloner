@@ -105,6 +105,17 @@ Calibration scores each take against the leave-one-out centroid of its own
 speaker. Scoring against a centroid the take helped compute inflates the target
 distribution and sets the threshold far too high.
 
+It produces **two** thresholds, because verification and identification ask
+different questions. Verification compares one score against one claim, so its
+impostor distribution is pairwise. Identification takes the maximum over N
+enrolled speakers, and the maximum of N draws sits far above a single draw:
+measured on 30 real speakers, pairwise impostors average −0.020 while an
+unenrolled voice's best match averages +0.354. Using the pairwise threshold for
+identification admitted 49 of 50 strangers. The identification threshold is
+therefore fitted to a leave-one-speaker-out best-match distribution — each
+enrolled speaker scored against the gallery without themselves, which is the
+situation a stranger is actually in.
+
 ### `augment.py` — degradations, for calibration
 
 Noise (white and pink), a synthetic room impulse response, telephone bandwidth, a

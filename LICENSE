@@ -20,7 +20,21 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-NOTE: This licence covers this source code only. Pretrained models downloaded
-by the optional neural backends carry their own licences -- the XTTS-v2
-checkpoint, for example, is released under the Coqui Public Model License and
-does not permit commercial use.
+NOTE: This licence covers this source code only.
+
+Pretrained models downloaded by the optional neural backends carry their own
+licences -- the XTTS-v2 checkpoint, for example, is released under the Coqui
+Public Model License and does not permit commercial use.
+
+The shipped reference statistics in voxprint/data/reference_dsp_v1.npz are
+derived in part from the LibriSpeech corpus (dev-other), which is licensed
+CC BY 4.0:
+
+    V. Panayotov, G. Chen, D. Povey and S. Khudanpur, "LibriSpeech: an ASR
+    corpus based on public domain audio books", ICASSP 2015.
+    https://www.openslr.org/12/
+
+The file contains two 373-element vectors of per-dimension means and standard
+deviations computed over that corpus and over procedurally generated voices. It
+contains no audio and nothing that identifies a speaker. Rebuild it from any
+other corpus with tools/build_reference.py.

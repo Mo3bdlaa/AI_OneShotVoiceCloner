@@ -114,10 +114,13 @@ def run_selftest(
 def conversion_report(backend: str = "dspvc", seconds: float = 3.0) -> dict:
     """Quantify what a conversion backend actually achieves.
 
-    Reports the target similarity of the source before and after conversion.
-    Whether the gap closes, and by how much, is the only meaningful answer to
-    "does this clone the voice?" -- and it is far more informative than listening
-    once and forming an impression.
+    Reports a *contrast*: similarity to the target minus similarity to the
+    source. Absolute cosines move with the reference population used for
+    standardisation -- swapping the shipped reference changed them by 0.4 without
+    the converter changing at all -- so an absolute "similarity after" is not a
+    property of the conversion. The contrast is: it starts strongly negative (the
+    clip sounds like the source) and rises as the conversion works, and reaching
+    zero would mean the output is equidistant from both voices.
     """
     from .normalization import load_default_reference
     from .synth import get_synth
@@ -134,10 +137,14 @@ def conversion_report(backend: str = "dspvc", seconds: float = 3.0) -> dict:
     embed = lambda w: std.transform(enc.embed(w, enc.sample_rate))  # noqa: E731
     e_src, e_tgt, e_out = embed(source), embed(target), embed(result.wav)
 
+    before = float(e_src @ e_tgt) - 1.0                      # the source against itself is 1.0
+    after = float(e_out @ e_tgt) - float(e_out @ e_src)
     return {
         "backend": backend,
-        "before": round(float(e_src @ e_tgt), 4),
-        "after": round(float(e_out @ e_tgt), 4),
-        "drift_from_source": round(float(e_out @ e_src), 4),
+        "contrast_before": round(before, 4),
+        "contrast_after": round(after, 4),
+        "gain": round(after - before, 4),
+        "similarity_to_target": round(float(e_out @ e_tgt), 4),
+        "similarity_to_source": round(float(e_out @ e_src), 4),
         "info": result.info,
     }

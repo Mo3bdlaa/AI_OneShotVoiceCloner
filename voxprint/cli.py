@@ -46,6 +46,10 @@ def _encode(obj):
     return json_default(obj)
 
 
+def _fmt(value: float | None) -> str:
+    return "not calibrated" if value is None else f"{value:.4f}"
+
+
 def _warn(message: str) -> None:
     print(f"warning: {message}", file=sys.stderr)
 
@@ -176,12 +180,21 @@ def cmd_calibrate(args) -> int:
     result = lab.calibrate(criterion=args.criterion, max_far=args.max_far, robust=args.robust)
     info = result.as_dict()
     lines = [
-        f"threshold {info['threshold']}  (criterion: {info['criterion']})",
-        f"  equal error rate      {'n/a' if info['eer'] is None else format(info['eer'], '.4f')}",
+        f"criterion: {info['criterion']}",
+        f"  verification threshold   {info['threshold']}   (1-to-1; used by `verify`)",
+        f"  identification threshold {info['identification_threshold']}   (1-to-N; used by `identify`)",
+        f"  equal error rate      {'n/a' if info['eer'] is None else format(info['eer'], '.4f')} pairwise, "
+        f"{'n/a' if info['identification_eer'] is None else format(info['identification_eer'], '.4f')} open-set",
         f"  false accepts at thr. {info['far_at_threshold']}",
         f"  false rejects at thr. {info['frr_at_threshold']}",
-        f"  trials: {info['target_pairs']} same-speaker, {info['impostor_pairs']} impostor",
+        f"  trials: {info['target_pairs']} same-speaker, {info['impostor_pairs']} impostor, "
+        f"{info['best_match_impostor_trials']} best-match",
     ]
+    if info["identification_threshold"] > info["threshold"] + 1e-9:
+        lines.append(
+            "  the identification threshold is higher because identification takes the best of "
+            f"{len(lab.gallery)} scores; recalibrate when the gallery grows"
+        )
     for warning in info["warnings"]:
         lines.append(f"  ! {warning}")
     if not info["usable"]:
@@ -305,7 +318,7 @@ def cmd_info(args) -> int:
         f"speakers       {info['speakers']}",
         f"utterances     {info['utterances']}",
         f"audio enrolled {info['total_seconds']:.1f}s",
-        f"threshold      {info['threshold'] if info['threshold'] is not None else 'not calibrated'}",
+        f"threshold      verification {_fmt(info['threshold'])} | identification {_fmt(info['identification_threshold'])}",
         f"standardizer   {info['standardizer']['source']} (n={info['standardizer']['n_samples']})",
     ]
     _emit(info, args.json, lines)

@@ -88,45 +88,53 @@ print(result.decision, result.best.speaker_id, result.best.score)
 
 ## How well does it actually work?
 
-Every table here is produced by `python tools/benchmark.py`, on 12 enrolled
-speakers and 12 strangers drawn from one mutually distinct pool of procedural
-voices, with 4-second takes and held-out queries.
+### On real speech
+
+Measured on LibriSpeech `dev-clean`: 30 enrolled speakers, 3 enrolment files
+each, 150 held-out queries, and 10 speakers held out entirely as strangers.
+
+| encoder | EER (1-to-1) | EER (open-set) | correct | strangers rejected |
+|---|---|---|---|---|
+| `dsp` | 0.131 | 0.333 | 58 % | 88 % |
+| **`ecapa`** | **0.011** | **0.033** | **100 %** | **100 %** |
+
+Reproduce with `voxprint eval /path/to/LibriSpeech/dev-clean --encoder ecapa`.
+
+That 1.1 % equal error rate is the published VoxCeleb-class figure, measured here
+rather than cited, and it is the honest answer to "is this usable?". **Yes, with
+`--encoder ecapa`.** The built-in `dsp` encoder gets a bit over half the
+identifications right on real speech — useful as a baseline and for testing the
+pipeline, not for anything that matters.
+
+### On synthetic voices
+
+`python tools/benchmark.py` runs the same protocol on 12 procedural speakers and
+12 strangers from one mutually distinct pool. It is an upper bound and a
+regression check, not a claim about people:
 
 | encoder | EER | closed-set | open-set rejection | same-speaker | impostor |
 |---|---|---|---|---|---|
-| `dsp` | 0.000 | 91.7 % | 100 % | +0.94 | +0.01 |
-| `ecapa` | 0.000 | 100 % | 91.7 % | +0.95 | +0.48 |
+| `dsp` | 0.000 | 91.7 % | 100 % | +0.96 | +0.40 |
 
-**These are an upper bound**, and the fixture matters as much as the result: the
-voices are clean and perfectly matched in recording conditions. Three limits
-matter, all measured rather than guessed.
+Three limits matter, all measured rather than guessed.
 
 ### Noise degrades scores long before it degrades ranking
 
 Clean enrolment, query degraded with pink noise:
 
-| query | `dsp` rank-1 | `dsp` accepted | `ecapa` rank-1 | `ecapa` accepted |
-|---|---|---|---|---|
-| clean | 100 % | 91.7 % | 100 % | 100 % |
-| 40 dB SNR | 100 % | 2.8 % | 100 % | 41.7 % |
-| 30 dB SNR | 86.1 % | 0 % | 77.8 % | 0 % |
-| 20 dB SNR | 52.8 % | 0 % | 86.1 % | 0 % |
-| 10 dB SNR | 50.0 % | 0 % | 91.7 % | 0 % |
+| query | `dsp` rank-1 | `dsp` accepted |
+|---|---|---|
+| clean | 100 % | 91.7 % |
+| 40 dB SNR | 100 % | 5.6 % |
+| 30 dB SNR | 91.7 % | 0 % |
+| 20 dB SNR | 91.7 % | 0 % |
+| 10 dB SNR | 75.0 % | 0 % |
 
-Two separate things are visible here, and conflating them sends you to the wrong
-fix.
-
-*The encoder.* ECAPA keeps ranking the right speaker first down to 10 dB SNR
-(91.7 %) where the DSP encoder is at chance-ish 50 %. That gap is the difference
-between a network trained discriminatively on thousands of speakers and a
-hand-built statistic, and it is why `--encoder ecapa` is the answer when accuracy
-matters. (ECAPA is also *understated* here: it was trained on real human speech,
-and these synthetic vowel-only voices are out of its domain.)
-
-*The threshold.* Acceptance collapses to zero for **both** encoders, because both
-were given a threshold derived from clean-against-clean comparisons and any
-condition mismatch shifts every score down. No encoder fixes that. Calibration
-does:
+Acceptance collapses long before ranking does, and the same holds for `ecapa`,
+which still ranks the right speaker first 92 % of the time at 10 dB SNR. The
+cause is not the encoder: a threshold derived from clean-against-clean
+comparisons is invalidated by any condition mismatch, which shifts every score
+down. Calibration fixes it:
 
 ```bash
 voxprint calibrate --robust
@@ -150,20 +158,28 @@ Half the `dsp` feature blocks describe the absolute spectrum, which the
 microphone and the room colour. Enrolling on a phone and querying on a laptop is
 the case it handles worst — use `--encoder ecapa` and `calibrate --robust`.
 
-### On real speech
+### Identification and verification need different thresholds
 
-The numbers above come from synthetic voices, which is a statement about the
-pipeline, not about accuracy on people. Point the harness at a real corpus laid
-out one folder per speaker:
+Verification compares one score against one claim. Identification takes the
+**maximum** over every enrolled speaker, and the maximum of N draws sits far
+above a single draw: measured on 30 real speakers, an unenrolled voice's best
+match averages +0.354 against a pairwise impostor mean of −0.020. Calibrating
+identification with a pairwise threshold admitted 49 of 50 strangers.
+
+`voxprint calibrate` therefore measures both — pairwise trials for verification,
+and a leave-one-speaker-out best-match distribution for identification — and
+`identify` uses the second. On the same data that lifted stranger rejection from
+2 % to 70 %, at a cost of 9 points of accuracy. Recalibrate after the gallery
+grows: the maximum is over more candidates.
+
+### Measure on your own data
 
 ```bash
-voxprint eval /path/to/corpus --enroll-files 3
+voxprint eval /path/to/corpus --enroll-files 3 --encoder ecapa
 ```
 
-It holds whole speakers out as strangers (not spare clips of enrolled speakers),
-reports a trial EER from held-out queries alongside the optimistic
-enrolment-based one, and separates ranking accuracy from acceptance. VoxCeleb,
-LibriSpeech, Common Voice grouped by `client_id`, or your own recordings all work.
+One folder per speaker. VoxCeleb, LibriSpeech, Common Voice grouped by
+`client_id`, or your own recordings.
 
 `docs/FEASIBILITY.md` goes through what each part of the system can and cannot
 deliver, and why.
@@ -195,10 +211,11 @@ Two design decisions are worth knowing about before reading the code.
 **Standardisation is not optional.** Raw statistics-based voice prints all sit
 within a hundredth of 1.0 of each other: measured same-speaker cosine 0.99 against
 different-speaker 0.98, which no threshold can separate. Dividing each dimension
-by the standard deviation of a reference population changes that to 0.82–0.89
-against below 0.57. `voxprint/normalization.py` explains why, and
-`tools/build_reference.py` rebuilds the shipped statistics — point it at a real
-corpus if you have one.
+by the standard deviation of a reference population fixes it, and *which*
+population matters: on real speech, a reference fitted on procedural voices alone
+rejects 60 % of strangers, one fitted on LibriSpeech 82 %, and one pooled from
+both 88 %. The shipped reference is the pooled one. `tools/build_reference.py`
+rebuilds it — point it at a corpus that matches your recording conditions.
 
 **Thresholds are measured, not chosen.** `voxprint calibrate` scores every
 enrolment take against the leave-one-out centroid of its own speaker and against
@@ -264,7 +281,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-242 tests, about a minute, no network access and no downloads — all test audio is
+250 tests, about 80 seconds, no network access and no downloads — all test audio is
 generated (the three that pull a 2 GB checkpoint are opt-in and skip by default). Several of them pin the claims in this README: measured accuracy, the
 watermark's detection margin *and* its documented failure under telephone
 bandwidth, the fact that robust calibration lowers the threshold without lowering
@@ -283,5 +300,14 @@ COQUI_TOS_AGREED=1 VOXPRINT_TEST_XTTS=1 pytest tests/test_neural_backends.py
 
 ## Licence
 
-MIT (see `LICENSE`). Pretrained models downloaded by the optional backends carry
-their own licences — XTTS-v2 in particular is non-commercial.
+MIT (see `LICENSE`). Two things it does not cover:
+
+- **Pretrained models** downloaded by the optional backends carry their own
+  licences — XTTS-v2 in particular is non-commercial.
+- **The shipped reference statistics** (`voxprint/data/reference_dsp_v1.npz`) are
+  derived in part from LibriSpeech `dev-other`, which is CC BY 4.0
+  (V. Panayotov, G. Chen, D. Povey and S. Khudanpur, *LibriSpeech: an ASR corpus
+  based on public domain audio books*, ICASSP 2015). The file holds two
+  373-element vectors of per-dimension means and standard deviations — no audio
+  and nothing speaker-identifiable. Rebuild it from your own data with
+  `tools/build_reference.py`.
