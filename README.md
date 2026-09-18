@@ -200,6 +200,13 @@ unlike encoder-based converters it keeps improving with more reference audio:
 Twenty to forty seconds is the useful range; `voxprint enroll` keeps up to 60 s
 for exactly this. The source identity is gone throughout (+0.02 to +0.04).
 
+Conversion has no notion of language — there is no text and no phoneme model, so
+the words come from the input recording. Measured, converting toward a target
+whose reference is English only: English source lands at +0.631, Arabic at
++0.483. Both work; the gap is the cost of a reference missing the phonemes Arabic
+has and English does not, so **use reference audio of the target speaking the
+language you will convert**.
+
 **The full loop, end to end.** Taking a recording of speaker A over a backing
 track, re-voicing it toward speaker B with 47 s of B's audio, and then asking the
 system itself who is speaking:

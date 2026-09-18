@@ -256,6 +256,28 @@ pipeline is 60 for this reason; it was 30 until this was measured.
 the recogniser. Nothing states the case against voice authentication more
 plainly.
 
+**Across languages.** Conversion has no notion of language: there is no text, no
+phoneme model, nothing that knows what is being said. The words come from the
+input recording, so Arabic in gives Arabic out. That is the theory; measured, it
+is *mostly* true. Converting Arabic and English speech toward the same target --
+whose reference audio is English only -- and scoring against their held-out voice
+print:
+
+| source language | before | after |
+|---|---|---|
+| English | +0.009 | **+0.631** |
+| Arabic | +0.022 | **+0.483** |
+
+Both work. Arabic lands about 0.15 lower, which is the cost of a reference that
+never contains the phonemes Arabic has and English does not. The fix is not a
+different converter: **use reference audio of the target speaking the language
+you will be converting.**
+
+One caveat on that number: ECAPA itself was trained on VoxCeleb, which is
+predominantly English, so some of the gap may be the measuring instrument rather
+than the conversion. Separating the two would need a speaker encoder trained on
+Arabic.
+
 **Without a trained model.** `dspvc` shifts the median pitch onto the target's
 using a phase vocoder, then applies the difference between the two long-term
 spectral envelopes as a smooth equalisation curve.
