@@ -239,10 +239,17 @@ voxprint train-svc --id me --audio-dir ~/recordings/me   # ~10 min of audio, a G
 voxprint revoice song.mp3 --id me --backend sovits --transpose -3 -o out.wav
 ```
 
-Measured trade-off, scoring against the target's held-out voice print: an
-under-trained so-vits-svc model (1 epoch on CPU) reached +0.273 where zero-shot
-kNN-VC reached +0.700 with no training at all. **So do not use so-vits-svc for
-speech** — kNN-VC beats it for free. Use it for singing, and train it properly.
+Measured over 6.5 hours of CPU training on 8.2 minutes of audio, scoring against
+the target's held-out voice print: the score peaks at **+0.549 after 2 800
+steps**, then falls back and oscillates between 0.38 and 0.45 for the next 5 000
+steps. Zero-shot kNN-VC scores **+0.700** on the same clip with no training at
+all.
+
+Three things follow. The curve is not monotonic, so pick a checkpoint by
+measuring rather than by taking the last one. More steps stopped being the
+constraint long before 8 000 — the 8.2 minutes of training audio did. And **for
+speech, so-vits-svc never caught the zero-shot converter**, so do not reach for
+it there. Use it for singing, with ten or more minutes of real audio and a GPU.
 
 `docs/SINGING.md` covers the training cost, the one setting that decides whether
 the melody survives, and live conversion into a virtual microphone.

@@ -20,22 +20,52 @@ that are structural rather than fixable by tuning:
 
 so-vits-svc addresses the first two directly: it conditions on F0 explicitly, and
 it is routinely trained on sung material. The price is that it is **not
-zero-shot** — and that price is real. Measured on the same clip, scoring the
-output against the target's held-out voice print:
+zero-shot** — and that price is real.
 
-| | → target | → source |
-|---|---|---|
-| the original vocal | −0.024 | +0.931 |
-| so-vits-svc after 1 epoch (~36 steps) | +0.273 | +0.136 |
-| kNN-VC, zero-shot, no training at all | **+0.700** | +0.059 |
+## What 6.5 hours of training actually buys
 
-The 36-step model has clearly learned *something* — it moved off the source
-almost completely — but it is far behind a zero-shot converter that needed no
-training. Upstream asks for 10 000+ steps for a reason.
+Trained on 8.2 minutes of one speaker, CPU-only, converting a clip of a different
+speaker and scoring the output against the target's **held-out** recordings:
+
+| training steps | → target | → source | wall clock |
+|---|---|---|---|
+| 0 (unconverted) | −0.024 | +0.931 | — |
+| 175 | +0.342 | +0.081 | 8 min |
+| 525 | +0.420 | +0.112 | 26 min |
+| 1 400 | +0.424 | +0.027 | 71 min |
+| **2 800** | **+0.549** | +0.032 | **155 min** |
+| 5 075 | +0.427 | +0.089 | ~4 h |
+| 5 950 | +0.446 | +0.029 | ~5 h |
+| 8 050 | +0.383 | +0.084 | ~6.5 h |
+| *kNN-VC, zero-shot* | *+0.700* | *+0.059* | *0* |
+
+Three findings, none of them what "train it longer" suggests.
+
+**The curve is not monotonic.** It peaks at 2 800 steps and then falls back and
+oscillates between 0.38 and 0.45 for the next 5 000. Taking the final checkpoint
+would have given +0.383 — worse than one taken four hours earlier. Pick the
+checkpoint by measuring, not by taking the last one. `tools/svc_curve.py` exists
+to make that easy.
+
+**More steps stopped being the constraint.** Upstream asks for 10 000+ steps, and
+at 8 050 this run is nowhere near its peak, let alone climbing. The limit is the
+8.2 minutes of training audio — below the ten minutes upstream asks for — not the
+amount of compute spent on it.
+
+**It never caught the zero-shot converter.** kNN-VC scored +0.700 on the same
+clip with no training whatsoever. Even at its best, so-vits-svc reached +0.549.
+
+One caveat that may cap the whole experiment: the training audio was 16 kHz
+upsampled to the 44.1 kHz the model expects, so there is no genuine
+high-frequency content for it to learn. A speaker encoder keys partly on
+full-band timbre, so a run on real 44.1 kHz recordings may have a higher ceiling
+than this one did.
 
 **So do not reach for so-vits-svc to convert speech.** kNN-VC beats it for free.
 Reach for it when the material is sung, where F0 conditioning is the thing that
-matters and no zero-shot converter here will do — and then train it properly.
+matters and no zero-shot converter here will do — and then give it ten or more
+minutes of real full-bandwidth audio, a GPU, and a checkpoint chosen by
+measurement.
 
 ## What so-vits-svc costs
 
