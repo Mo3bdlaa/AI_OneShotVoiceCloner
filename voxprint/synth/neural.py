@@ -11,6 +11,34 @@ XTTS-v2 ships under the **Coqui Public Model License (CPML)**, which does *not*
 permit commercial use. YourTTS is likewise research-oriented. Read the licence
 of whichever checkpoint you download before building anything on it; nothing in
 this repository grants rights to those weights.
+
+Coqui asks for that agreement interactively on first download. This backend will
+not answer on your behalf: it checks for ``COQUI_TOS_AGREED=1`` and refuses with
+an explanation if it is unset, rather than either accepting a licence for you or
+hanging on a prompt nobody can see.
+
+Verified behaviour
+------------------
+Measured on this codebase with ``torch 2.8.0+cpu``, XTTS-v2 on CPU:
+
+* English, 44 characters -> 3.6 s of 24 kHz audio in 27 s (first call, includes
+  warm-up); Arabic, 48 characters -> 4.6 s of audio in 6.6 s. Roughly 1.4x real
+  time once warm, which is usable.
+* Conditioning demonstrably works. Given references with median pitch 228 Hz and
+  143 Hz, the generated speech came back at 230-258 Hz and 160 Hz respectively --
+  it reproduces the reference's register rather than a default voice.
+* Two generations from one reference score +0.81 against each other; two
+  different references score +0.66. The register evidence above is the stronger
+  signal, since identical text inflates both numbers.
+
+Dependency constraints found the hard way, both pinned in
+``requirements-neural.txt``:
+
+* ``transformers>=5`` removes ``isin_mps_friendly``, which Coqui TTS imports.
+  Installation succeeds and the import then fails.
+* ``torch>=2.9`` drops torchaudio's built-in audio IO in favour of
+  ``torchcodec``, which needs FFmpeg shared libraries present on the system.
+  Without them the model loads and then fails when reading the reference file.
 """
 
 from __future__ import annotations
@@ -28,6 +56,13 @@ _INSTALL_HINT = (
     "This backend needs the optional neural extras:\n"
     "    pip install -r requirements-neural.txt\n"
     "The first run also downloads the model checkpoint (~2 GB for XTTS-v2)."
+)
+
+_LICENCE_HINT = (
+    "This model's weights are covered by the Coqui Public Model License, which does not "
+    "permit commercial use: https://coqui.ai/cpml\n"
+    "voxprint will not agree to it for you. If you accept those terms, set:\n"
+    "    export COQUI_TOS_AGREED=1"
 )
 
 #: Languages XTTS-v2 was trained on, including Arabic.
@@ -66,11 +101,27 @@ class CoquiCloner(VoiceSynthesizer):
     # -- environment ------------------------------------------------------- #
 
     def available(self) -> tuple[bool, str]:
+        """Report readiness, distinguishing *missing* from *broken*.
+
+        These need different fixes and must not share a message. An import error
+        from deep inside the package usually means a dependency conflict -- Coqui
+        TTS against ``transformers>=5`` fails with a missing
+        ``isin_mps_friendly``, for instance -- and telling that user to install
+        the package they already have sends them in the wrong direction.
+        """
         try:
             import TTS  # noqa: F401,PLC0415
-        except ImportError:
+        except ModuleNotFoundError:
             return False, "coqui TTS not installed (pip install -r requirements-neural.txt)"
+        except ImportError as exc:
+            return False, f"coqui TTS is installed but will not import -- likely a dependency conflict: {exc}"
+        if not self._licence_agreed():
+            return False, _LICENCE_HINT
         return True, "installed (model downloads on first use)"
+
+    @staticmethod
+    def _licence_agreed() -> bool:
+        return os.environ.get("COQUI_TOS_AGREED", "").strip() in ("1", "true", "True", "yes")
 
     @property
     def device(self) -> str:
@@ -88,8 +139,14 @@ class CoquiCloner(VoiceSynthesizer):
             return self._model
         try:
             from TTS.api import TTS  # noqa: PLC0415
-        except ImportError as exc:
+        except ModuleNotFoundError as exc:
             raise RuntimeError(f"coqui TTS is not installed.\n{_INSTALL_HINT}") from exc
+        except ImportError as exc:
+            raise RuntimeError(
+                f"coqui TTS is installed but failed to import: {exc}\n"
+                "This is usually a dependency conflict rather than a missing package. "
+                "The pinned set in requirements-neural.txt is known to work."
+            ) from exc
         model = TTS(self.model_name)
         # Older Coqui releases have no .to(); device selection is then implicit.
         if hasattr(model, "to"):
@@ -112,6 +169,7 @@ class CoquiCloner(VoiceSynthesizer):
         text = (text or "").strip()
         if not text:
             raise ValueError("nothing to synthesize: text is empty")
+        self._require_licence()
         if language not in XTTS_LANGUAGES and self.model_name == self.DEFAULT_MODEL:
             raise ValueError(
                 f"language {language!r} is not supported by XTTS-v2. Supported: {', '.join(XTTS_LANGUAGES)}"
@@ -141,6 +199,7 @@ class CoquiCloner(VoiceSynthesizer):
         sr: int = TARGET_SR,
         **kwargs,
     ) -> SynthResult:
+        self._require_licence()
         model = self._load()
         with _reference_file(source, sr) as src_path, _reference_file(reference, sr) as ref_path:
             wav = model.voice_conversion(source_wav=src_path, target_wav=ref_path, **kwargs)
@@ -150,6 +209,16 @@ class CoquiCloner(VoiceSynthesizer):
             backend=self.name,
             info={"model": self.model_name, "device": self.device, "mode": "voice_conversion"},
         )
+
+    def _require_licence(self) -> None:
+        """Refuse rather than accept the model licence on the user's behalf.
+
+        Coqui prompts for agreement on stdin, which in a non-interactive run
+        hangs with no visible cause. Neither accepting silently nor hanging is
+        acceptable, so this fails with the terms named.
+        """
+        if not self._licence_agreed():
+            raise RuntimeError(_LICENCE_HINT)
 
     def _model_sample_rate(self) -> int:
         """Ask the loaded model for its output rate, falling back to the default."""

@@ -148,3 +148,39 @@ def test_platt_scaler_is_monotonic_and_calibrated():
 def test_platt_scaler_degrades_gracefully():
     scaler = scoring.PlattScaler.fit(np.zeros(0), np.zeros(0))
     assert scaler.probability(0.5) == pytest.approx(0.6224, abs=1e-3)
+
+
+def test_calibration_with_one_take_per_speaker_is_reported_unusable():
+    """A gallery with single takes has no same-speaker trials to balance."""
+    g = Gallery(SPEC, require_consent=False)
+    for i in range(4):
+        g.enroll(f"spk{i}", cluster(seed=i, n=1)[0])
+
+    result = scoring.calibrate(g)
+    assert result.n_target == 0
+    assert not result.usable
+    assert any("two enrolment takes" in w for w in result.warnings)
+
+
+def test_calibration_dict_is_strict_json():
+    """NaN is not valid JSON: a bare NaN token breaks JSON.parse in a browser."""
+    import json
+
+    g = Gallery(SPEC, require_consent=False)
+    for i in range(3):
+        g.enroll(f"spk{i}", cluster(seed=i, n=1)[0])
+
+    payload = json.dumps(scoring.calibrate(g).as_dict())
+
+    def reject(constant):
+        raise AssertionError(f"non-JSON constant in output: {constant}")
+
+    parsed = json.loads(payload, parse_constant=reject)
+    assert parsed["eer"] is None
+    assert parsed["usable"] is False
+
+
+def test_a_healthy_calibration_is_usable(gallery):
+    result = scoring.calibrate(gallery)
+    assert result.usable
+    assert result.warnings == []

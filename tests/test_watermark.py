@@ -91,3 +91,13 @@ def test_short_audio_is_handled():
 
 def test_embedding_does_not_clip(clip):
     assert np.max(np.abs(embed_watermark(clip * 0.99))) <= 1.0
+
+
+def test_detection_fields_are_json_native():
+    """numpy.bool_ serialises as the string "True", which breaks API clients."""
+    import json
+
+    clip = random_speaker(seed=2).say("aiueoaiueo", 5.0, seed=2)
+    payload = json.loads(json.dumps(detect_watermark(embed_watermark(clip)).as_dict()))
+    assert payload["present"] is True
+    assert isinstance(payload["confidence"], float)

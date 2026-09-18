@@ -31,15 +31,26 @@ than granting it, consent was never meaningful.
 `speak` carries a spread-spectrum watermark, checkable with
 `voxprint watermark check`.
 
+**The non-commercial model licence is not accepted for you.** Coqui asks for
+agreement to the CPML on first download, interactively. Answering that prompt on
+a user's behalf would be accepting a licence in their name, so the backend
+refuses instead, names the terms, and requires `COQUI_TOS_AGREED=1` to be set
+deliberately.
+
+**The server is local by default.** `voxprint serve` binds to `127.0.0.1`. There
+is no authentication, and the gallery is biometric data, so binding it anywhere
+else is an explicit decision the server warns about.
+
 ## What the watermark is and is not
 
 Measured behaviour, from `tests/test_watermark.py` and the module docstring:
 
 - 34 dB below the signal — inaudible at normal listening levels;
 - detected at z ≥ 27 on a 2-second clip, against a peak of 5.8 on unmarked audio;
-- survives arbitrary cropping, 20 dB SNR added noise, and band-limiting to 12 kHz;
-- **does not** survive resampling through 8 kHz (telephone bandwidth), where only
-  2 of 10 test clips still detect.
+- survives arbitrary cropping, 20 dB SNR added noise, and band-limiting to
+  12 kHz (10 of 10 test clips);
+- **does not reliably** survive resampling through 8 kHz (telephone bandwidth),
+  where about half of the test clips still detect.
 
 So: it answers "was this file produced by this tool?" for a cooperative verifier.
 It does not answer "is this audio real?" against someone who does not want it to.

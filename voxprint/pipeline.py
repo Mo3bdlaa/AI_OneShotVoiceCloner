@@ -253,14 +253,108 @@ class VoiceLab:
         return verify(vecs.mean(axis=0), self.gallery, speaker_id,
                       threshold=threshold, scaler=self.scaler)
 
-    def calibrate(self, *, criterion: str = "eer", max_far: float = 0.01) -> CalibrationResult:
-        """Measure score distributions, set the threshold, fit the probability map."""
+    def calibrate(
+        self,
+        *,
+        criterion: str = "eer",
+        max_far: float = 0.01,
+        robust: bool = False,
+        suite: list | None = None,
+    ) -> CalibrationResult:
+        """Measure score distributions, set the threshold, fit the probability map.
+
+        With ``robust=True`` the trials also include degraded copies of the
+        enrolment audio -- noise, reverberation, telephone bandwidth, a different
+        microphone response. A clean-only calibration produces a threshold that is
+        valid only for queries recorded exactly like the enrolment was; measured
+        on synthetic speakers, such a threshold accepts 97% of clean queries and
+        3% of the same queries at 40 dB SNR, even though the encoder still ranks
+        the right speaker first every time. Showing calibration the mismatch is
+        what fixes that.
+
+        It costs accuracy on clean audio -- a lower threshold accepts more
+        impostors -- so it is opt-in, and the returned result reports both the
+        error rates and the conditions they were measured under.
+        """
         self.gallery.refit_standardizer()
         result = calibrate(self.gallery, criterion=criterion, max_far=max_far)
-        self.gallery.threshold = result.threshold
-        self.scaler = PlattScaler.fit(result.target_scores, result.impostor_scores)
-        self._maybe_save()
+
+        if robust:
+            result = self._widen_calibration(result, criterion=criterion, max_far=max_far, suite=suite)
+
+        # An unusable calibration must not leave a threshold behind: `identify`
+        # would then report `calibrated: true` for a number nothing measured.
+        if result.usable:
+            self.gallery.threshold = result.threshold
+            self.scaler = PlattScaler.fit(result.target_scores, result.impostor_scores)
+            self._maybe_save()
         return result
+
+    def _widen_calibration(
+        self,
+        clean: CalibrationResult,
+        *,
+        criterion: str,
+        max_far: float,
+        suite: list | None = None,
+    ) -> CalibrationResult:
+        """Re-derive the threshold with degraded copies of the enrolment audio."""
+        from .augment import default_suite
+        from .scoring import equal_error_rate, threshold_for_far
+
+        suite = default_suite() if suite is None else suite
+        ids, centroids = self.gallery.centroid_matrix(standardize=True)
+        index = {sid: i for i, sid in enumerate(ids)}
+
+        target = [clean.target_scores]
+        impostor = [clean.impostor_scores]
+        conditions: list[str] = []
+
+        for sid in ids:
+            path = self.reference_audio_path(sid)
+            if not os.path.exists(path):
+                continue
+            wav, sr = load_audio(path, sr=self.encoder.sample_rate)
+            # A few seconds is enough, and keeps a robust calibration quick.
+            wav = wav[: int(self.encoder.sample_rate * 8.0)]
+            for augmentation in suite:
+                try:
+                    degraded = augmentation(wav, sr, seed=abs(hash(sid)) % 10_000)
+                    vec = self.gallery.standardizer.transform(self.encoder.embed(degraded, sr))
+                except Exception:
+                    # A degradation that destroys the audio is itself informative,
+                    # but it cannot contribute a score; skip rather than fail.
+                    continue
+                scores = centroids @ vec
+                own = index[sid]
+                target.append(np.array([scores[own]]))
+                impostor.append(np.delete(scores, own))
+                if augmentation.name not in conditions:
+                    conditions.append(augmentation.name)
+
+        all_target = np.concatenate(target)
+        all_impostor = np.concatenate(impostor)
+        eer, eer_threshold = equal_error_rate(all_target, all_impostor)
+        threshold = eer_threshold if criterion == "eer" else threshold_for_far(all_target, all_impostor, max_far)
+
+        warnings = list(clean.warnings)
+        if not conditions:
+            warnings.append(
+                "no reference audio stored for any speaker, so no degraded trials could be built; "
+                "this is the clean calibration. Re-enrol with keep_audio=True."
+            )
+
+        return CalibrationResult(
+            threshold=float(threshold),
+            eer=eer,
+            n_target=int(all_target.size),
+            n_impostor=int(all_impostor.size),
+            target_scores=all_target,
+            impostor_scores=all_impostor,
+            criterion=f"{criterion}+robust" if conditions else criterion,
+            warnings=warnings,
+            conditions=conditions,
+        )
 
     # -- imitation --------------------------------------------------------- #
 

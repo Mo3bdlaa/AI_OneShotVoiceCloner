@@ -185,7 +185,10 @@ def detect_watermark(
     chips = _sequence(key, tag)
     best_z, best_offset, best_used = _best_alignment(_sliding_scores(x, chips))
 
-    present = abs(best_z) >= z_threshold
+    # bool(), not the numpy scalar a comparison returns: np.bool_ is not a
+    # JSON-native type and serialises as the string "True" through a default=str
+    # encoder, which silently breaks every API client.
+    present = bool(abs(best_z) >= z_threshold)
     return WatermarkDetection(
         present=present,
         confidence=float(abs(best_z)),

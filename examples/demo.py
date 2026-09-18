@@ -120,10 +120,14 @@ def main() -> int:
           f"(z={detect_watermark(original).confidence:.1f})")
 
     rule("next steps")
-    print("  Text-to-speech cloning needs a trained model:")
-    print("      pip install -r requirements-neural.txt")
     voices = os.path.join(args.out, "voices")
+    print("  Text-to-speech cloning needs a trained model (17 languages, Arabic included):")
+    print("      pip install -r requirements-neural.txt")
+    print("      export COQUI_TOS_AGREED=1      # the checkpoint is non-commercial")
     print(f"      voxprint --root {voices} speak 'مرحبا' --id hana --language ar -o hello.wav")
+    print()
+    print("  Or drive all of this from a browser, recording straight from the microphone:")
+    print(f"      voxprint --root {voices} serve")
     return 0
 
 

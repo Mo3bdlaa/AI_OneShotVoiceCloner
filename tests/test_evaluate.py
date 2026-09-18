@@ -22,3 +22,39 @@ def test_conversion_report_quantifies_the_gap():
     report = conversion_report()
     assert report["after"] > report["before"]
     assert report["after"] < 0.8, "DSP conversion is timbre transfer, not identity cloning"
+
+
+def test_distinct_speakers_are_actually_distinct():
+    """The fixture must not hand the evaluation two copies of one voice."""
+    import itertools
+
+    from voxprint.synthetic import MIN_VOICE_DISTANCE, distinct_speakers, voice_distance
+
+    speakers = distinct_speakers(12, seed=1)
+    assert len(speakers) == 12
+    pairs = [voice_distance(a, b) for a, b in itertools.combinations(speakers, 2)]
+    assert min(pairs) >= MIN_VOICE_DISTANCE
+
+
+def test_distinct_speakers_is_deterministic():
+    from voxprint.synthetic import distinct_speakers, voice_distance
+
+    a = distinct_speakers(6, seed=3)
+    b = distinct_speakers(6, seed=3)
+    assert all(voice_distance(x, y) == 0.0 for x, y in zip(a, b, strict=True))
+
+
+def test_distinct_speakers_reports_when_it_cannot_pack_enough():
+    import pytest
+
+    from voxprint.synthetic import distinct_speakers
+
+    with pytest.raises(ValueError, match="could only place"):
+        distinct_speakers(50, seed=1, min_distance=3.0, max_attempts=2000)
+
+
+def test_selftest_draws_strangers_from_the_same_distinct_pool():
+    """Strangers must be as different from enrolled speakers as speakers are from each other."""
+    report = run_selftest(n_speakers=8, seconds=3.0, n_strangers=8)
+    assert report["min_voice_distance"] > 0
+    assert report["open_set_rejection"] >= 0.85

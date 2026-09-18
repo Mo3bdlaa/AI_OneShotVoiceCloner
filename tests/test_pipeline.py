@@ -157,3 +157,55 @@ def test_summary_reports_the_state(lab):
     assert info["speakers"] == 5
     assert info["encoder"]["name"] == "dsp"
     assert info["threshold"] is not None
+
+
+def test_robust_calibration_lowers_the_threshold(lab):
+    """Showing calibration a condition mismatch must move the threshold down."""
+    clean = lab.calibrate()
+    robust = lab.calibrate(robust=True)
+
+    assert robust.threshold < clean.threshold
+    assert robust.criterion == "eer+robust"
+    assert robust.conditions, "the conditions used must be reported"
+    assert robust.n_target > clean.n_target
+    # The higher error rate is the honest cost, not a regression.
+    assert robust.eer >= clean.eer
+
+
+def test_robust_calibration_accepts_degraded_queries_the_clean_one_rejects(lab, clips):
+    from voxprint.augment import add_noise
+
+    noisy = [add_noise(_load(path), 25.0, seed=1) for path in (clips[n][3] for n in ("omar", "hana", "sami"))]
+
+    def accepted(threshold_source):
+        from voxprint.scoring import identify
+
+        return sum(
+            int(identify(lab.encoder.embed(w), lab.gallery).accepted)
+            for w in noisy
+        )
+
+    lab.calibrate()
+    clean_accepts = accepted("clean")
+    lab.calibrate(robust=True)
+    robust_accepts = accepted("robust")
+    assert robust_accepts >= clean_accepts
+
+
+def _load(path):
+    from voxprint.audio import load_audio
+
+    wav, _ = load_audio(path)
+    return wav
+
+
+def test_unusable_calibration_leaves_the_threshold_alone(tmp_path, clips):
+    """Otherwise `identify` reports `calibrated: true` for an unmeasured number."""
+    lab = VoiceLab(tmp_path / "voices")
+    for name in ("omar", "hana", "sami"):
+        lab.enroll(name, clips[name][:1], consent=CONSENT)   # one take each
+
+    result = lab.calibrate()
+    assert not result.usable
+    assert lab.gallery.threshold is None
+    assert lab.identify_file(clips["omar"][3]).calibrated is False

@@ -53,20 +53,46 @@ encoder that is strong within one recording setup and weak across two.
 
 ### Measured accuracy
 
-20 procedural speakers, three 4-second enrolment takes each, held-out queries:
+12 enrolled speakers and 12 strangers from one mutually distinct pool, three
+4-second enrolment takes each, held-out queries. Reproduce with
+`python tools/benchmark.py --encoders dsp ecapa`.
 
-| condition | ranking correct | accepted at the calibrated threshold |
-|---|---|---|
-| clean | 100 % | 98.3 % |
-| 40 dB SNR | 93.3 % | 5.0 % |
-| 30 dB SNR | 75.0 % | 0 % |
-| 20 dB SNR | 23.3 % | 0 % |
+| query | `dsp` rank-1 | `dsp` accepted | `ecapa` rank-1 | `ecapa` accepted |
+|---|---|---|---|---|
+| clean | 100 % | 91.7 % | 100 % | 100 % |
+| 40 dB SNR | 100 % | 2.8 % | 100 % | 41.7 % |
+| 30 dB SNR | 86.1 % | 0 % | 77.8 % | 0 % |
+| 20 dB SNR | 52.8 % | 0 % | 86.1 % | 0 % |
+| 10 dB SNR | 50.0 % | 0 % | 91.7 % | 0 % |
 
-The middle column is the useful diagnostic. Mild noise barely disturbs the
-*ordering* of candidates while pushing every score below a threshold that was
-calibrated on clean audio. Any deployment where query conditions differ from
-enrolment conditions needs its threshold calibrated under query conditions, not
-enrolment conditions.
+Read the rank-1 and accepted columns as two separate findings.
+
+**Rank-1 is about the encoder.** ECAPA still ranks the right speaker first 91.7 %
+of the time at 10 dB SNR, where the DSP encoder has fallen to 50 %. That is the
+gap between learning what distinguishes speakers from thousands of labelled
+examples and being told what to measure. And ECAPA is understated here: it was
+trained on real speech, and vowel-only synthetic voices are outside its domain.
+
+**Acceptance is about the threshold.** It collapses to zero for *both* encoders,
+because both were given a threshold from clean-against-clean comparisons and any
+condition mismatch shifts every score downward. Changing encoder does not fix
+this. `voxprint calibrate --robust` does, by scoring degraded copies of the
+enrolment audio during calibration: measured on five speakers, acceptance at
+30 dB SNR rises from 50 % to 83 % with clean acceptance unchanged, while the
+equal error rate goes from 0.058 to 0.102. That higher error rate is not a
+regression -- it is what the system's accuracy always was under mismatch, now
+visible instead of hidden behind a threshold nobody could meet.
+
+### A note on the fixture itself
+
+An earlier version of this evaluation drew enrolled speakers and strangers
+independently from the voice generator. The generator has only ten identity
+parameters, so it happily produced a "stranger" closer to an enrolled speaker
+than two enrolled speakers were to each other -- and the reported open-set
+rejection then swung between 100 % and 33 % with the seed, measuring the fixture
+rather than the system. :func:`voxprint.synthetic.distinct_speakers` now draws
+one mutually separated pool and splits it, which is why the numbers above are
+stable. Worth recording because the failure looked exactly like a system defect.
 
 Query duration, with enrolment held at 4 seconds:
 
@@ -125,7 +151,9 @@ follows, rather than balancing the two errors as if they cost the same.
 
 One caveat stated plainly: calibration uses enrolment audio, so the reported
 false-accept rate is a floor. Real queries come from other people, other rooms and
-other microphones, and the true rate is higher.
+other microphones, and the true rate is higher. `voxprint eval` on a real corpus
+reports a *trial* EER from held-out queries alongside the enrolment-based one, and
+the difference between the two is the size of that optimism.
 
 ---
 
@@ -173,15 +201,42 @@ for six seconds, requires knowing how voice identity maps onto acoustics across
 all phonemes — knowledge that only exists inside a model trained on thousands of
 speakers.
 
-XTTS-v2 does this well. It takes about six seconds of reference audio, supports 17
-languages including Arabic, and produces convincing results. It is wired in as the
-`xtts` backend and it is a ~2 GB download.
+XTTS-v2 does this well. It is wired in as the `xtts` backend, it is a ~2 GB
+download, and it has been run end to end on this codebase rather than merely
+imported. Measured on CPU with `torch 2.8.0`:
 
-Two things to know before building on it:
+| | result |
+|---|---|
+| English, 44 characters | 3.6 s of 24 kHz audio in 27 s (first call, includes warm-up) |
+| Arabic, 48 characters | 4.6 s of audio in 6.6 s — about 1.4× real time once warm |
+| conditioning | reference at 228 Hz → output at 230–258 Hz; reference at 143 Hz → output at 160 Hz |
+| two runs, one reference | +0.81 against each other |
+| two different references | +0.66 |
+
+The pitch row is the decisive one. Given two reference recordings differing only
+in register, the model returned speech in the matching register each time — it is
+using the reference, not falling back to a default voice. (The similarity scores
+are less informative here: identical text inflates both, and the `dsp` encoder is
+content-sensitive.)
+
+One caveat about those numbers: the references were the same procedural voices
+used everywhere else in this repository, which are vowel-only and unlike real
+speech. XTTS handled them, but its fidelity on a real human reference is not
+something a synthetic fixture can measure. For that, record yourself.
+
+Three practical things before building on it:
 
 - **Licence.** The XTTS-v2 checkpoint is released under the Coqui Public Model
   License, which does not permit commercial use. The MIT licence on this
-  repository covers the source code only.
+  repository covers the source code only. Coqui asks for that agreement on first
+  download; this backend refuses with the terms named rather than answering for
+  you, so you must set `COQUI_TOS_AGREED=1` yourself.
+- **Two dependency pins, both found by hitting them.** `transformers>=5` removed
+  `isin_mps_friendly`, which Coqui TTS imports — installation succeeds and the
+  import then fails. And `torch>=2.9` drops torchaudio's built-in audio IO for
+  `torchcodec`, which needs FFmpeg shared libraries on the system; without them
+  the model loads and then dies reading the reference file. Both are pinned in
+  `requirements-neural.txt` with the reason recorded.
 - **Quality varies by language.** Arabic is supported and works, but the training
   data is far smaller than for English, and it shows — particularly in prosody and
   in the handling of unvowelled text.

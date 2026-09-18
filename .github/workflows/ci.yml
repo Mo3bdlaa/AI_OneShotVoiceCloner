@@ -37,3 +37,6 @@ jobs:
 
       - name: Self-evaluation
         run: python -m voxprint.cli selftest --speakers 8 --seconds 3
+
+      - name: Benchmark tables (dsp only; no model downloads)
+        run: python tools/benchmark.py --speakers 8 --strangers 8 --seconds 3

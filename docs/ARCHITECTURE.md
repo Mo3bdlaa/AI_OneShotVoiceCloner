@@ -105,6 +105,29 @@ Calibration scores each take against the leave-one-out centroid of its own
 speaker. Scoring against a centroid the take helped compute inflates the target
 distribution and sets the threshold far too high.
 
+### `augment.py` — degradations, for calibration
+
+Noise (white and pink), a synthetic room impulse response, telephone bandwidth, a
+microphone tilt, and clipping. Its reason for existing is in the module docstring:
+a threshold calibrated on clean audio accepts almost nothing once the query
+conditions change, for *both* the DSP and the neural encoder, and no choice of
+encoder fixes that. `calibrate --robust` scores degraded copies of the enrolment
+audio so the threshold accounts for the shift.
+
+### `corpus.py` — evaluation on real speech
+
+The same protocol as `evaluate.py`, on a folder-per-speaker corpus, with three
+things the procedural evaluation cannot give: whole speakers held out as
+strangers, a trial EER from held-out queries alongside the optimistic
+enrolment-based one, and ranking accuracy reported separately from acceptance.
+
+### `server.py` — HTTP API and browser UI
+
+`http.server` rather than a web framework, so the core install stays at three
+dependencies. Binds to `127.0.0.1` by default and says so loudly when told to
+bind elsewhere; a voice-print gallery is biometric data and there is no
+authentication. Every endpoint maps to a `VoiceLab` method — no logic lives here.
+
 ### `synth/` — two capabilities, not one
 
 Backends declare `capabilities` — `{"tts"}`, `{"vc"}`, or both — so asking a
@@ -140,7 +163,16 @@ The suite is built around properties rather than golden outputs:
 - the watermark must be detected after cropping and noise, and must **not** be
   detected after telephone-bandwidth resampling — a documented limitation pinned
   by a test so it cannot be quietly over-claimed later;
-- `voxprint selftest` numbers must stay within the ranges quoted in the README.
+- robust calibration must lower the threshold and must not lower clean acceptance;
+- `voxprint selftest` numbers must stay within the ranges quoted in the README;
+- the fixture itself is tested: `distinct_speakers` must return voices that are
+  actually distinct, because an earlier version did not and its open-set numbers
+  swung with the seed.
+
+`tests/test_neural_backends.py` covers the optional backends and skips when they
+are absent. The XTTS tests additionally need `VOXPRINT_TEST_XTTS=1`, since they
+pull a 2 GB checkpoint. They have been run: ECAPA and XTTS both work, including
+Arabic synthesis, and the numbers are in `docs/FEASIBILITY.md`.
 
 Synthetic voices are easier than real ones. The suite proves the pipeline is
 correct and that the documented claims hold; it does not prove the encoder is

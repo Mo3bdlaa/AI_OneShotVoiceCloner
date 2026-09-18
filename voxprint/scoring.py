@@ -188,6 +188,24 @@ class CalibrationResult:
     target_scores: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
     impostor_scores: np.ndarray = field(repr=False, default_factory=lambda: np.zeros(0))
     criterion: str = "eer"
+    #: Problems that make the threshold untrustworthy, e.g. no same-speaker
+    #: trials because every speaker has a single enrolment take.
+    warnings: list[str] = field(default_factory=list)
+    #: Acoustic conditions represented in the trials. Empty means clean-only,
+    #: which makes the threshold valid only for queries recorded like the
+    #: enrolment audio was.
+    conditions: list[str] = field(default_factory=list)
+
+    @property
+    def usable(self) -> bool:
+        """Whether this calibration actually measured anything.
+
+        With one enrolment take per speaker there are no leave-one-out
+        same-speaker trials, so there is nothing to balance against the impostor
+        scores and the "threshold" is just the fallback constant. Reporting that
+        as calibrated would be a lie that propagates into every later decision.
+        """
+        return self.n_target > 0 and self.n_impostor > 0 and np.isfinite(self.eer)
 
     def rates_at(self, threshold: float) -> tuple[float, float]:
         """``(false_accept_rate, false_reject_rate)`` at a given threshold."""
@@ -199,15 +217,26 @@ class CalibrationResult:
         far, frr = self.rates_at(self.threshold)
         return {
             "criterion": self.criterion,
+            "usable": self.usable,
+            "warnings": list(self.warnings),
             "threshold": round(self.threshold, 4),
-            "eer": round(self.eer, 4),
+            # NaN is not valid JSON -- Python emits a bare `NaN` token that
+            # JSON.parse and most strict parsers reject, so a browser client
+            # would fail on the whole response rather than on one field.
+            "eer": _finite(self.eer),
             "far_at_threshold": None if np.isnan(far) else round(far, 4),
             "frr_at_threshold": None if np.isnan(frr) else round(frr, 4),
             "target_pairs": self.n_target,
             "impostor_pairs": self.n_impostor,
             "target_score_mean": round(float(self.target_scores.mean()), 4) if self.n_target else None,
             "impostor_score_mean": round(float(self.impostor_scores.mean()), 4) if self.n_impostor else None,
+            "conditions": list(self.conditions),
         }
+
+
+def _finite(value: float, digits: int = 4) -> float | None:
+    """Round for output, mapping NaN and infinities to ``None`` (JSON ``null``)."""
+    return round(float(value), digits) if np.isfinite(value) else None
 
 
 def collect_trial_scores(gallery: Gallery) -> tuple[np.ndarray, np.ndarray]:
@@ -296,6 +325,18 @@ def calibrate(gallery: Gallery, *, criterion: str = "eer", max_far: float = 0.01
     else:
         raise ValueError(f"unknown calibration criterion {criterion!r}; use 'eer' or 'far'")
 
+    warnings: list[str] = []
+    if target.size == 0:
+        single = [p.speaker_id for p in gallery if p.n_utterances < 2]
+        who = f"only one take: {', '.join(single)}" if single else "only one take each"
+        warnings.append(
+            "no same-speaker trials. Leave-one-out scoring needs at least two enrolment takes per "
+            f"speaker, and these have {who}. The threshold reported below is the uncalibrated "
+            "default -- add another recording per speaker and calibrate again."
+        )
+    if gallery.spec.dim and len(gallery.prints) < 2:
+        warnings.append("fewer than two speakers: there are no impostor trials to measure against")
+
     return CalibrationResult(
         threshold=float(threshold),
         eer=eer,
@@ -304,6 +345,7 @@ def calibrate(gallery: Gallery, *, criterion: str = "eer", max_far: float = 0.01
         target_scores=target,
         impostor_scores=impostor,
         criterion=criterion,
+        warnings=warnings,
     )
 
 

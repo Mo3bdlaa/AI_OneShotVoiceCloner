@@ -42,6 +42,8 @@ neural = [
     "torchaudio>=2.0",
     "speechbrain>=1.0",
     "coqui-tts>=0.24",
+    # coqui-tts imports a symbol transformers 5.0 removed; see requirements-neural.txt
+    "transformers>=4.43,<5",
 ]
 dev = [
     "pytest>=7.4",

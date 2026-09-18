@@ -65,6 +65,9 @@ voxprint verify claim.wav --id omar    # exit 0 = accept, 2 = reject
 voxprint convert someone.wav --id omar -o out.wav              # works offline
 voxprint speak "مرحبا" --id omar --language ar -o hello.wav \
     --backend xtts                                             # needs the neural extras
+
+# or drive all of it from a browser, recording straight from the microphone
+voxprint serve
 ```
 
 From Python:
@@ -85,46 +88,82 @@ print(result.decision, result.best.speaker_id, result.best.score)
 
 ## How well does it actually work?
 
-Measured on 20 procedurally generated speakers, three 4-second enrolment takes
-each, scored on held-out recordings (`voxprint selftest` runs a smaller version):
+Every table here is produced by `python tools/benchmark.py`, on 12 enrolled
+speakers and 12 strangers drawn from one mutually distinct pool of procedural
+voices, with 4-second takes and held-out queries.
 
-| metric | result |
-|---|---|
-| equal error rate | 0.002 |
-| closed-set accuracy (clean) | 98.3 % |
-| open-set rejection of unenrolled voices | 100 % |
-| same-speaker score | +0.91 |
-| impostor score | −0.05 |
+| encoder | EER | closed-set | open-set rejection | same-speaker | impostor |
+|---|---|---|---|---|---|
+| `dsp` | 0.000 | 91.7 % | 100 % | +0.94 | +0.01 |
+| `ecapa` | 0.000 | 100 % | 91.7 % | +0.95 | +0.48 |
 
-**These are an upper bound.** The voices are clean, perfectly matched in
-recording conditions, and differ from each other in exactly the parameters the
-encoder measures. Real speech is none of those things. Three limits matter, and
-all three were measured rather than guessed:
+**These are an upper bound**, and the fixture matters as much as the result: the
+voices are clean and perfectly matched in recording conditions. Three limits
+matter, all measured rather than guessed.
 
-**Noise breaks it.** With clean enrolment and a noisy query:
+### Noise degrades scores long before it degrades ranking
 
-| query condition | ranking correct | accepted at the threshold |
-|---|---|---|
-| clean | 100 % | 98.3 % |
-| 40 dB SNR | 93.3 % | 5.0 % |
-| 30 dB SNR | 75.0 % | 0 % |
-| 20 dB SNR | 23.3 % | 0 % |
+Clean enrolment, query degraded with pink noise:
 
-Note the shape of that failure: at 40 dB the system still *ranks* the right
-speaker first 93 % of the time, but every score falls below a threshold
-calibrated on clean audio. Mild noise shows up first as a score shift, and only
-later as a ranking collapse. The practical mitigation is to enrol under the same
-conditions you will query under. The real fix is the `ecapa` encoder, which was
-trained with noise augmentation.
+| query | `dsp` rank-1 | `dsp` accepted | `ecapa` rank-1 | `ecapa` accepted |
+|---|---|---|---|---|
+| clean | 100 % | 91.7 % | 100 % | 100 % |
+| 40 dB SNR | 100 % | 2.8 % | 100 % | 41.7 % |
+| 30 dB SNR | 86.1 % | 0 % | 77.8 % | 0 % |
+| 20 dB SNR | 52.8 % | 0 % | 86.1 % | 0 % |
+| 10 dB SNR | 50.0 % | 0 % | 91.7 % | 0 % |
 
-**Short queries are unreliable.** Under one second there is not enough speech to
-estimate the statistics: 1 s fails outright, 2 s gets 57 %, 3 s and above reach
-95 % or better. Aim for at least three seconds, and six or more for enrolment.
+Two separate things are visible here, and conflating them sends you to the wrong
+fix.
 
-**Cross-microphone matching is the weak point by design.** Half the feature
-blocks describe the absolute spectrum, which the microphone and room colour.
-Enrolling on a phone and querying on a laptop is the case this encoder handles
-worst.
+*The encoder.* ECAPA keeps ranking the right speaker first down to 10 dB SNR
+(91.7 %) where the DSP encoder is at chance-ish 50 %. That gap is the difference
+between a network trained discriminatively on thousands of speakers and a
+hand-built statistic, and it is why `--encoder ecapa` is the answer when accuracy
+matters. (ECAPA is also *understated* here: it was trained on real human speech,
+and these synthetic vowel-only voices are out of its domain.)
+
+*The threshold.* Acceptance collapses to zero for **both** encoders, because both
+were given a threshold derived from clean-against-clean comparisons and any
+condition mismatch shifts every score down. No encoder fixes that. Calibration
+does:
+
+```bash
+voxprint calibrate --robust
+```
+
+which also scores degraded copies of the enrolment audio — pink and white noise,
+reverberation, telephone bandwidth, a microphone tilt. Measured on five
+speakers, acceptance of queries at 30 dB SNR goes from 50 % to 83 %, with clean
+acceptance unchanged; the equal error rate rises from 0.058 to 0.102, which is
+the honest price of a threshold that survives a change of room.
+
+### Short queries are unreliable
+
+Under one second there is not enough speech to estimate the statistics: 1 s
+fails outright, 2 s reaches 57 %, 3 s and above 95 % or better. Aim for three
+seconds of query and six or more for enrolment.
+
+### Cross-microphone matching is the weak point by design
+
+Half the `dsp` feature blocks describe the absolute spectrum, which the
+microphone and the room colour. Enrolling on a phone and querying on a laptop is
+the case it handles worst — use `--encoder ecapa` and `calibrate --robust`.
+
+### On real speech
+
+The numbers above come from synthetic voices, which is a statement about the
+pipeline, not about accuracy on people. Point the harness at a real corpus laid
+out one folder per speaker:
+
+```bash
+voxprint eval /path/to/corpus --enroll-files 3
+```
+
+It holds whole speakers out as strangers (not spare clips of enrolled speakers),
+reports a trial EER from held-out queries alongside the optimistic
+enrolment-based one, and separates ranking accuracy from acceptance. VoxCeleb,
+LibriSpeech, Common Voice grouped by `client_id`, or your own recordings all work.
 
 `docs/FEASIBILITY.md` goes through what each part of the system can and cannot
 deliver, and why.
@@ -143,9 +182,12 @@ voxprint/
   gallery.py        enrolled speakers, consent records, persistence
   scoring.py        identification, verification, threshold calibration
   synth/            imitation backends (dspvc, xtts, yourtts)
+  augment.py        noise, reverb, channel -- for realistic calibration
   watermark.py      provenance marking of generated audio
   pipeline.py       VoiceLab -- the API the CLI is built on
-  evaluate.py       measured self-evaluation
+  evaluate.py       self-evaluation on procedural voices
+  corpus.py         evaluation on a real corpus
+  server.py         HTTP API and browser UI
 ```
 
 Two design decisions are worth knowing about before reading the code.
@@ -161,7 +203,9 @@ corpus if you have one.
 **Thresholds are measured, not chosen.** `voxprint calibrate` scores every
 enrolment take against the leave-one-out centroid of its own speaker and against
 every other speaker, then finds the equal-error point. A hard-coded threshold
-would be a guess about your microphone, your room, and your speakers.
+would be a guess about your microphone, your room, and your speakers. Add
+`--robust` and the trials include degraded copies of the enrolment audio, which
+is what makes the threshold survive a condition change.
 
 ## Encoders and backends
 
@@ -178,11 +222,28 @@ voxprint backends    # shows what is installed and what each thing costs
 | backend | can do | needs | notes |
 |---|---|---|---|
 | `dspvc` | speech → speech | nothing | timbre transfer, not identity cloning |
-| `xtts` | text → speech, speech → speech | neural extras, ~2 GB | 17 languages including Arabic; **non-commercial licence** |
+| `xtts` | text → speech, speech → speech | neural extras, ~2 GB | 17 languages including Arabic; ~1.4× real time on CPU; **non-commercial licence** |
 | `yourtts` | text → speech | neural extras | lighter, lower fidelity, en/fr/pt |
+
+Both `ecapa` and `xtts` have been run end to end, not just imported — including
+Arabic synthesis. The measurements, and the two dependency pins needed to make
+Coqui TTS import at all, are in `docs/FEASIBILITY.md`. XTTS will not run until
+you set `COQUI_TOS_AGREED=1`: the checkpoint is non-commercial, and this code does
+not accept that licence on your behalf.
 
 Switching encoder changes nothing else — the gallery refuses to mix embeddings
 from different encoders rather than silently comparing incomparable vectors.
+
+## Browser UI
+
+```bash
+voxprint serve        # http://127.0.0.1:8000
+```
+
+Record from the microphone, enrol, calibrate, identify, convert, check a
+watermark. Binds to localhost by default — the gallery is biometric data and the
+server has no authentication, so exposing it is a decision you have to make
+explicitly with `--host`.
 
 ## Consent and provenance
 
@@ -203,9 +264,22 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-180 tests, about 30 seconds, no network access and no downloads. Several of them
-pin the claims in this README: if the measured accuracy or the watermark
-robustness regresses, the suite fails.
+242 tests, about a minute, no network access and no downloads — all test audio is
+generated (the three that pull a 2 GB checkpoint are opt-in and skip by default). Several of them pin the claims in this README: measured accuracy, the
+watermark's detection margin *and* its documented failure under telephone
+bandwidth, the fact that robust calibration lowers the threshold without lowering
+clean acceptance. A regression fails the suite rather than quietly outdating the
+docs.
+
+The optional backends have their own file, skipped when their dependencies are
+absent:
+
+```bash
+pip install -r requirements-neural.txt
+COQUI_TOS_AGREED=1 VOXPRINT_TEST_XTTS=1 pytest tests/test_neural_backends.py
+```
+
+`python tools/benchmark.py --encoders dsp ecapa` reproduces every table above.
 
 ## Licence
 

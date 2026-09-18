@@ -11,3 +11,11 @@ torch>=2.0
 torchaudio>=2.0
 speechbrain>=1.0
 coqui-tts>=0.24
+
+# Coqui TTS still imports transformers.pytorch_utils.isin_mps_friendly, which was
+# removed in transformers 5.0. Without this pin the package installs cleanly and
+# then fails at import with a confusing AttributeError.
+transformers>=4.43,<5
+
+# CPU-only PyTorch is a much smaller download and is what this runs on anyway:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio

@@ -98,7 +98,30 @@ def test_calibrate_reports_error_rates(capsys, root, clips):
     code, out, _ = run(capsys, "--root", root, "calibrate")
     assert code == 0
     assert "equal error rate" in out
-    assert "real-world error will be higher" in out
+    assert "clean enrolment audio only" in out
+    assert "--robust" in out
+
+
+def test_calibrate_robust_reports_its_conditions(capsys, root, clips):
+    for name, files in clips.items():
+        main(["--root", root, "enroll", *files[:3], "--id", name, *CONSENT])
+    capsys.readouterr()
+    code, out, _ = run(capsys, "--root", root, "calibrate", "--robust")
+    assert code == 0
+    assert "eer+robust" in out
+    assert "conditions: clean +" in out
+    assert "reverb" in out and "telephone" in out
+
+
+def test_robust_threshold_is_lower_than_the_clean_one(capsys, root, clips):
+    import json as _json
+
+    for name, files in clips.items():
+        main(["--root", root, "enroll", *files[:3], "--id", name, *CONSENT])
+    capsys.readouterr()
+    clean = _json.loads(run(capsys, "--root", root, "--json", "calibrate")[1])
+    robust = _json.loads(run(capsys, "--root", root, "--json", "calibrate", "--robust")[1])
+    assert robust["threshold"] < clean["threshold"]
 
 
 def test_calibrate_needs_two_speakers(capsys, root, clips):
@@ -152,6 +175,21 @@ def test_info_summarises_the_gallery(capsys, enrolled):
     code, out, _ = run(capsys, "--root", enrolled, "info")
     assert code == 0
     assert "speakers       5" in out
+
+
+def test_serve_is_registered_with_a_local_default(capsys):
+    """The server must not default to a public bind address."""
+    from voxprint.cli import build_parser
+
+    args = build_parser().parse_args(["serve"])
+    assert args.host == "127.0.0.1"
+    assert args.port == 8000
+
+
+def test_eval_reports_a_missing_corpus_cleanly(capsys, tmp_path):
+    code, _, err = run(capsys, "eval", str(tmp_path / "nothing"))
+    assert code == 1
+    assert "not a directory" in err
 
 
 def test_selftest_reports_measured_accuracy(capsys):

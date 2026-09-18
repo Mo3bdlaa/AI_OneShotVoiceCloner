@@ -51,9 +51,19 @@ class EcapaSpeakerEncoder(SpeakerEncoder):
     def _torch(self):
         try:
             import torch  # noqa: PLC0415
-        except ImportError as exc:
+        except ModuleNotFoundError as exc:
             raise RuntimeError(f"PyTorch is not installed.\n{_INSTALL_HINT}") from exc
         return torch
+
+    def available(self) -> tuple[bool, str]:
+        try:
+            import speechbrain  # noqa: F401,PLC0415
+            import torch  # noqa: F401,PLC0415
+        except ModuleNotFoundError as exc:
+            return False, f"{exc.name} not installed (pip install -r requirements-neural.txt)"
+        except ImportError as exc:
+            return False, f"installed but will not import -- likely a dependency conflict: {exc}"
+        return True, "installed (model downloads on first use)"
 
     @property
     def device(self) -> str:
@@ -68,11 +78,18 @@ class EcapaSpeakerEncoder(SpeakerEncoder):
             return self._model
         try:
             from speechbrain.inference.speaker import EncoderClassifier  # noqa: PLC0415
-        except ImportError:
+        except ImportError as primary:
             try:  # SpeechBrain < 1.0 kept it under a different path
                 from speechbrain.pretrained import EncoderClassifier  # noqa: PLC0415
-            except ImportError as exc:
+            except ModuleNotFoundError as exc:
                 raise RuntimeError(f"speechbrain is not installed.\n{_INSTALL_HINT}") from exc
+            except ImportError as exc:
+                # Installed but unimportable -- a dependency conflict, which needs
+                # a different fix from a missing package.
+                raise RuntimeError(
+                    f"speechbrain is installed but failed to import: {primary}\n"
+                    "This is usually a dependency conflict rather than a missing package."
+                ) from exc
 
         self._model = EncoderClassifier.from_hparams(
             source=self.source,

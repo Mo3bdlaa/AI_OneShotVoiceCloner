@@ -17,6 +17,7 @@ import numpy as np
 
 from . import __version__
 from .audio import load_audio, save_audio
+from .corpus import CorpusError
 from .encoders import available_encoders, get_encoder
 from .gallery import ConsentError, ConsentRecord, GalleryError
 from .pipeline import VoiceLab
@@ -39,15 +40,10 @@ def _emit(payload: Any, as_json: bool, lines: list[str] | None = None) -> None:
 
 
 def _encode(obj):
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (np.bool_,)):
-        return bool(obj)
-    raise TypeError(f"not JSON serialisable: {type(obj)!r}")
+    """Shared with the server; see :func:`voxprint.server.json_default`."""
+    from .server import json_default
+
+    return json_default(obj)
 
 
 def _warn(message: str) -> None:
@@ -177,16 +173,26 @@ def cmd_calibrate(args) -> int:
     if len(lab.gallery) < 2:
         _warn("calibration needs at least two enrolled speakers")
         return 1
-    result = lab.calibrate(criterion=args.criterion, max_far=args.max_far)
+    result = lab.calibrate(criterion=args.criterion, max_far=args.max_far, robust=args.robust)
     info = result.as_dict()
     lines = [
         f"threshold {info['threshold']}  (criterion: {info['criterion']})",
-        f"  equal error rate      {info['eer']:.4f}",
+        f"  equal error rate      {'n/a' if info['eer'] is None else format(info['eer'], '.4f')}",
         f"  false accepts at thr. {info['far_at_threshold']}",
         f"  false rejects at thr. {info['frr_at_threshold']}",
         f"  trials: {info['target_pairs']} same-speaker, {info['impostor_pairs']} impostor",
-        "  note: measured on enrolment audio only, so real-world error will be higher",
     ]
+    for warning in info["warnings"]:
+        lines.append(f"  ! {warning}")
+    if not info["usable"]:
+        lines.append("  the gallery threshold was left unchanged")
+    if info["conditions"]:
+        lines.append(f"  conditions: clean + {', '.join(info['conditions'])}")
+        lines.append("  note: the higher error rate is the price of a threshold that survives a")
+        lines.append("        change of microphone or room -- a clean-only threshold does not")
+    else:
+        lines.append("  note: measured on clean enrolment audio only. This threshold is valid for")
+        lines.append("        queries recorded like the enrolment was; try --robust otherwise")
     _emit(info, args.json, lines)
     return 0
 
@@ -306,6 +312,63 @@ def cmd_info(args) -> int:
     return 0
 
 
+def cmd_eval(args) -> int:
+    """Measure accuracy on a real corpus laid out one folder per speaker."""
+    from .corpus import evaluate_corpus
+
+    report = evaluate_corpus(
+        args.corpus,
+        encoder=args.encoder,
+        enroll_files=args.enroll_files,
+        stranger_fraction=args.stranger_fraction,
+        max_trials_per_speaker=args.max_trials,
+        max_speakers=args.max_speakers,
+        seed=args.seed,
+        progress=not args.json,
+    )
+    split = report["split"]
+    lines = [
+        f"corpus  {report['corpus']}",
+        f"encoder {report['encoder']} ({report['dim']} dims)",
+        f"split   {split['enrolled_speakers']} enrolled / {split['stranger_speakers']} strangers, "
+        f"{split['enrollment_files']} enrolment + {split['trial_files']} trial files",
+        "",
+        f"  trial equal error rate   {report['trial_eer']}      <- the deployment-relevant number",
+        f"  enrolment EER            {report['enrolment_eer']}      (optimistic: enrolment audio only)",
+        f"  threshold                {report['threshold']}",
+        f"  rank-1 accuracy          {report['rank1_accuracy']}   ({report['trials']} trials)",
+        f"  accepted and correct     {report['accepted_and_correct']}",
+        f"  open-set rejection       {report['open_set_rejection']}   ({report['stranger_trials']} stranger trials)",
+        f"  target / impostor score  {report['target_score_mean']} / {report['impostor_score_mean']}",
+    ]
+    if report["rank1_accuracy"] and report["accepted_and_correct"] is not None:
+        gap = report["rank1_accuracy"] - report["accepted_and_correct"]
+        if gap > 0.1:
+            lines.append(
+                f"  ! {gap:.0%} of queries rank the right speaker first but score below the threshold -- "
+                "a condition mismatch between enrolment and trials, not a ranking failure"
+            )
+    if report["file_error_count"]:
+        lines.append(f"  ! {report['file_error_count']} file(s) could not be used:")
+        lines.extend(f"      {e}" for e in report["file_errors"][:5])
+    _emit(report, args.json, lines)
+    return 0
+
+
+def cmd_serve(args) -> int:
+    """Run the browser UI."""
+    from .server import serve
+
+    serve(
+        root=args.root,
+        encoder=args.encoder,
+        host=args.host,
+        port=args.port,
+        require_consent=not args.no_consent_check,
+    )
+    return 0
+
+
 def cmd_selftest(args) -> int:
     """Run the pipeline on procedurally generated voices and report real numbers."""
     from .evaluate import run_selftest
@@ -384,6 +447,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("calibrate", help="set the decision threshold from measured scores")
     p.add_argument("--criterion", default="eer", choices=("eer", "far"))
     p.add_argument("--max-far", type=float, default=0.01, help="target false-accept rate for --criterion far")
+    p.add_argument("--robust", action="store_true",
+                   help="also calibrate against degraded copies of the enrolment audio "
+                        "(noise, reverb, telephone band, microphone tilt)")
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("convert", help="re-voice an existing recording toward a target voice")
@@ -419,6 +485,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("info", help="summarise the gallery")
     p.set_defaults(func=cmd_info)
 
+    p = sub.add_parser("serve", help="run the browser UI (record, enrol, identify, convert)")
+    p.add_argument("--host", default="127.0.0.1", help="bind address; anything but localhost exposes the gallery")
+    p.add_argument("--port", type=int, default=8000)
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("eval", help="measure accuracy on a real corpus (one folder per speaker)")
+    p.add_argument("corpus", help="directory containing one sub-directory per speaker")
+    p.add_argument("--enroll-files", type=int, default=3, help="files per speaker used for enrolment")
+    p.add_argument("--max-trials", type=int, default=5, help="held-out query files per speaker")
+    p.add_argument("--stranger-fraction", type=float, default=0.25,
+                   help="fraction of speakers held out entirely, to measure open-set rejection")
+    p.add_argument("--max-speakers", type=int, help="cap the corpus size for a quick run")
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=cmd_eval)
+
     p = sub.add_parser("selftest", help="measure accuracy on procedurally generated voices")
     p.add_argument("--speakers", type=int, default=12)
     p.add_argument("--seconds", type=float, default=4.0)
@@ -431,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (GalleryError, ValueError, FileNotFoundError, KeyError, RuntimeError) as exc:
+    except (CorpusError, GalleryError, ValueError, FileNotFoundError, KeyError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:  # pragma: no cover

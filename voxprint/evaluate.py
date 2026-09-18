@@ -19,7 +19,7 @@ import numpy as np
 from .encoders import get_encoder
 from .gallery import Gallery
 from .scoring import PlattScaler, calibrate, identify
-from .synthetic import PHRASES, random_speaker
+from .synthetic import MIN_VOICE_DISTANCE, PHRASES, distinct_speakers
 
 ENROLL_PHRASES = PHRASES[:3]
 HELDOUT_PHRASES = PHRASES[3:]
@@ -30,19 +30,24 @@ def build_gallery(
     n_speakers: int = 12,
     seconds: float = 4.0,
     seed_base: int = 100_000,
+    speakers: list | None = None,
 ) -> tuple[Gallery, list]:
-    """Enrol ``n_speakers`` synthetic voices with three takes each."""
+    """Enrol ``n_speakers`` synthetic voices with three takes each.
+
+    ``speakers`` overrides the draw, which is how :func:`run_selftest` guarantees
+    that the enrolled voices and the strangers all come from one mutually
+    distinct pool.
+    """
+    if speakers is None:
+        speakers = distinct_speakers(n_speakers, seed=seed_base)
     gallery = Gallery(encoder.spec, require_consent=False)
-    speakers = []
-    for i in range(n_speakers):
-        speaker = random_speaker(seed=seed_base + i)
+    for i, speaker in enumerate(speakers):
         vecs = [
             encoder.embed(speaker.say(phrase, seconds, seed=seed_base + 1000 * (j + 1) + i))
             for j, phrase in enumerate(ENROLL_PHRASES)
         ]
         gallery.enroll(f"spk{i:02d}", np.stack(vecs), seconds=seconds * len(ENROLL_PHRASES))
-        speakers.append(speaker)
-    return gallery, speakers
+    return gallery, list(speakers)
 
 
 def run_selftest(
@@ -50,10 +55,21 @@ def run_selftest(
     n_speakers: int = 12,
     seconds: float = 4.0,
     n_strangers: int = 12,
+    min_distance: float = MIN_VOICE_DISTANCE,
 ) -> dict:
-    """Enrol, calibrate, then measure closed-set accuracy and open-set rejection."""
+    """Enrol, calibrate, then measure closed-set accuracy and open-set rejection.
+
+    Enrolled voices and strangers are drawn from one mutually distinct pool. That
+    matters: sampling them independently lets the generator produce a "stranger"
+    closer to an enrolled speaker than two enrolled speakers are to each other,
+    and the open-set figure then measures the generator rather than the system.
+    An earlier version of this function did exactly that, and its reported
+    rejection rate swung with the seed.
+    """
     enc = get_encoder(encoder)
-    gallery, speakers = build_gallery(enc, n_speakers=n_speakers, seconds=seconds)
+    pool = distinct_speakers(n_speakers + n_strangers, seed=1, min_distance=min_distance)
+    speakers, stranger_pool = pool[:n_speakers], pool[n_speakers:]
+    gallery, speakers = build_gallery(enc, n_speakers=n_speakers, seconds=seconds, speakers=speakers)
 
     # The user's own workflow: refit the reference statistics on the enrolled
     # population, then calibrate a threshold from the enrolment scores.
@@ -74,8 +90,7 @@ def run_selftest(
 
     # Strangers: voices that were never enrolled must be rejected.
     rejected = 0
-    for s in range(n_strangers):
-        stranger = random_speaker(seed=700_000 + s)
+    for s, stranger in enumerate(stranger_pool):
         wav = stranger.say(PHRASES[s % len(PHRASES)], seconds, seed=800_000 + s)
         rejected += int(not identify(enc.embed(wav), gallery).accepted)
 
@@ -90,6 +105,7 @@ def run_selftest(
         "closed_set_trials": trials,
         "open_set_rejection": round(rejected / max(n_strangers, 1), 4),
         "open_set_trials": n_strangers,
+        "min_voice_distance": min_distance,
         "target_mean": round(float(cal.target_scores.mean()), 4) if cal.n_target else None,
         "impostor_mean": round(float(cal.impostor_scores.mean()), 4) if cal.n_impostor else None,
     }
@@ -110,8 +126,7 @@ def conversion_report(backend: str = "dspvc", seconds: float = 3.0) -> dict:
     std = load_default_reference(enc.spec)
     synth = get_synth(backend)
 
-    source_speaker = random_speaker(seed=310)
-    target_speaker = random_speaker(seed=420)
+    source_speaker, target_speaker = distinct_speakers(2, seed=31)
     source = source_speaker.say(PHRASES[0], seconds, seed=1)
     target = target_speaker.say(PHRASES[1], seconds, seed=2)
 

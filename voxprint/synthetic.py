@@ -168,6 +168,95 @@ CAST: list[SyntheticSpeaker] = [
 ]
 
 
+#: Sampling ranges for every identity parameter, used to put them on one scale.
+#: Pitch and formants are compared in the log domain because both are perceived
+#: roughly logarithmically.
+_PARAM_RANGES = {
+    "log_f0": (np.log(80.0), np.log(260.0)),
+    "log_f1": (np.log(430.0), np.log(830.0)),
+    "log_f2": (np.log(1030.0), np.log(2080.0)),
+    "log_f3": (np.log(2180.0), np.log(3250.0)),
+    "bw1": (60.0, 130.0),
+    "bw2": (80.0, 160.0),
+    "bw3": (110.0, 220.0),
+    "jitter": (0.004, 0.028),
+    "breathiness": (0.0, 0.07),
+    "tilt": (-2.5, 2.5),
+}
+
+
+def voice_parameters(speaker: SyntheticSpeaker) -> np.ndarray:
+    """The speaker's identity as a point in a normalised parameter space.
+
+    Every parameter the generator varies is included, each scaled to roughly
+    ``[0, 1]`` across its sampling range, so no single axis dominates the
+    distance. Restricting this to pitch and formants alone would understate how
+    different two voices are: breathiness, spectral tilt and jitter are all cues
+    the encoder measures, and two voices matching in formants but differing in
+    those are not the same voice.
+    """
+    raw = {
+        "log_f0": np.log(speaker.f0),
+        "log_f1": np.log(speaker.formants[0]),
+        "log_f2": np.log(speaker.formants[1]),
+        "log_f3": np.log(speaker.formants[2]),
+        "bw1": speaker.bandwidths[0],
+        "bw2": speaker.bandwidths[1],
+        "bw3": speaker.bandwidths[2],
+        "jitter": speaker.jitter,
+        "breathiness": speaker.breathiness,
+        "tilt": speaker.tilt,
+    }
+    return np.array(
+        [(raw[k] - lo) / (hi - lo) for k, (lo, hi) in _PARAM_RANGES.items()],
+        dtype=np.float64,
+    )
+
+
+def voice_distance(a: SyntheticSpeaker, b: SyntheticSpeaker) -> float:
+    """Euclidean distance between two voices in that space."""
+    return float(np.linalg.norm(voice_parameters(a) - voice_parameters(b)))
+
+
+#: Minimum separation for :func:`distinct_speakers`, in the normalised parameter
+#: space above. Set by measurement rather than taste: see the capacity table in
+#: that function's docstring.
+MIN_VOICE_DISTANCE = 0.55
+
+
+def distinct_speakers(
+    n: int,
+    seed: int = 0,
+    min_distance: float = MIN_VOICE_DISTANCE,
+    max_attempts: int = 20_000,
+) -> list[SyntheticSpeaker]:
+    """Draw ``n`` voices that are all genuinely different from each other.
+
+    Plain rejection-free sampling from :func:`random_speaker` produces collisions:
+    the generator has only a handful of identity parameters, so drawing forty
+    voices from it reliably yields pairs closer together than two deliberately
+    different speakers. An evaluation built on such a set reports "false accepts"
+    that are really correct answers about near-identical voices, and its
+    open-set numbers swing with the seed.
+
+    This rejects any draw that lands within ``min_distance`` of one already
+    accepted, so a set built here supports the claims made about it.
+    """
+    chosen: list[SyntheticSpeaker] = []
+    attempt = 0
+    while len(chosen) < n and attempt < max_attempts:
+        candidate = random_speaker(seed=seed * 1_000_003 + attempt)
+        attempt += 1
+        if all(voice_distance(candidate, other) >= min_distance for other in chosen):
+            chosen.append(candidate)
+    if len(chosen) < n:
+        raise ValueError(
+            f"could only place {len(chosen)} of {n} voices at least {min_distance} apart "
+            f"in {max_attempts} attempts; lower min_distance or ask for fewer speakers"
+        )
+    return chosen
+
+
 #: Phoneme sequences standing in for different "sentences".
 PHRASES = ("aiueo", "oeuia", "uaeoi", "eioua", "auoie", "iouae")
 
