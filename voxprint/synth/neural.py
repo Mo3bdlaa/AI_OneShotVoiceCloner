@@ -387,6 +387,89 @@ class OpenVoiceConverter(CoquiVoiceConverter):
     DEFAULT_MODEL = "voice_conversion_models/multilingual/multi-dataset/openvoice_v2"
 
 
+class SoVitsConverter(VoiceSynthesizer):
+    """so-vits-svc -- singing voice conversion with a model trained per voice.
+
+    The odd one out. Every other converter here takes reference *audio* at
+    conversion time; this one takes a trained *model*, so ``convert`` ignores the
+    reference argument entirely and the workspace is supplied at construction.
+    That mismatch is information, not an inconvenience: it is exactly the
+    difference between zero-shot conversion and a model that learned one voice.
+
+    Use it for singing. See :mod:`voxprint.svc` for the training pipeline, why
+    ``auto_predict_f0`` must stay off for a song, and what the run costs.
+    """
+
+    name = "sovits"
+    version = "1"
+    capabilities = frozenset({"vc"})
+    sample_rate = 44_100
+    notes = "Singing voice conversion. Needs a model trained on the target (~10 min of audio, a GPU)."
+
+    def __init__(self, workspace=None, *, transpose: int = 0, auto_predict_f0: bool = False,
+                 f0_method: str = "dio", device: str = "cpu"):
+        self.workspace = workspace
+        self.transpose = transpose
+        self.auto_predict_f0 = auto_predict_f0
+        self.f0_method = f0_method
+        self.device = device
+
+    def available(self) -> tuple[bool, str]:
+        from ..svc import available as svc_available  # noqa: PLC0415
+
+        ready, reason = svc_available()
+        if not ready:
+            return False, reason
+        if self.workspace is None:
+            return False, "no trained model selected; train one with `voxprint train-svc --id <speaker>`"
+        if not self.workspace.is_trained():
+            return False, f"no checkpoint under {self.workspace.model_dir}"
+        return True, f"trained model at {self.workspace.root}"
+
+    def convert(
+        self,
+        source: np.ndarray,
+        reference: np.ndarray,
+        sr: int = TARGET_SR,
+        **kwargs,
+    ) -> SynthResult:
+        """Convert ``source``. ``reference`` is ignored -- the model is the voice."""
+        import tempfile  # noqa: PLC0415
+
+        from ..audio import load_audio, save_audio  # noqa: PLC0415
+        from ..svc import infer  # noqa: PLC0415
+
+        ready, reason = self.available()
+        if not ready:
+            raise RuntimeError(f"backend {self.name!r} is not usable: {reason}")
+
+        with tempfile.TemporaryDirectory(prefix="voxprint_sovits_") as tmp:
+            src_path = os.path.join(tmp, "source.wav")
+            out_path = os.path.join(tmp, "converted.wav")
+            save_audio(src_path, np.asarray(source, dtype=np.float32), sr)
+            infer(
+                self.workspace, src_path, out_path,
+                transpose=kwargs.pop("transpose", self.transpose),
+                auto_predict_f0=kwargs.pop("auto_predict_f0", self.auto_predict_f0),
+                f0_method=kwargs.pop("f0_method", self.f0_method),
+                device=self.device,
+            )
+            wav, out_sr = load_audio(out_path, sr=self.sample_rate)
+
+        return SynthResult(
+            wav=wav,
+            sample_rate=out_sr,
+            backend=self.name,
+            info={
+                "workspace": str(self.workspace.root),
+                "checkpoint": str(self.workspace.latest_checkpoint()),
+                "transpose": self.transpose,
+                "auto_predict_f0": self.auto_predict_f0,
+                "f0_method": self.f0_method,
+            },
+        )
+
+
 class YourTtsCloner(CoquiCloner):
     """YourTTS -- smaller and faster than XTTS, fewer languages, lower fidelity."""
 
@@ -401,6 +484,11 @@ class YourTtsCloner(CoquiCloner):
         # YourTTS uses its own language tags and has no speed control.
         kwargs.pop("speed", None)
         return super().synthesize(text, reference, sr, language=language, **kwargs)
+
+
+@register_synth("sovits")
+def _make_sovits(**kwargs) -> SoVitsConverter:
+    return SoVitsConverter(**kwargs)
 
 
 @register_synth("knnvc")

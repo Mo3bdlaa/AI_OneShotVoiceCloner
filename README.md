@@ -220,15 +220,27 @@ mixes it back over the untouched instrumental. On the test mix the separated
 vocal correlated +0.968 with the true vocal and +0.064 with the backing, and the
 re-voiced result scored +0.668 mixed, +0.700 as a bare vocal.
 
-**But singing is not speech, and every converter here was trained on speech.**
-Sustained vowels, vibrato and a two-octave range are out of domain; separation
-adds artefacts that conversion then amplifies. Expect a usable result on speech
-and a rough one on singing. Systems built for singing — RVC, so-vits-svc — sound
-far better and are *not* zero-shot: they want ~10 minutes of the target voice and
-a training run. This pipeline is the right shape for those too; swap the
-converter and keep the separation and remix.
+**But singing is not speech, and the zero-shot converters were trained on
+speech.** Sustained vowels, vibrato and a two-octave range are out of domain;
+separation adds artefacts that conversion then amplifies.
 
-On CPU, budget roughly 4× real time for separation and 2× for conversion.
+For singing there is `--backend sovits`, which conditions on pitch explicitly and
+so keeps the melody — at the cost of not being zero-shot:
+
+```bash
+voxprint train-svc --id me --audio-dir ~/recordings/me   # ~10 min of audio, a GPU
+voxprint revoice song.mp3 --id me --backend sovits --transpose -3 -o out.wav
+```
+
+Measured trade-off, scoring against the target's held-out voice print: an
+under-trained so-vits-svc model (1 epoch on CPU) reached +0.273 where zero-shot
+kNN-VC reached +0.700 with no training at all. **So do not use so-vits-svc for
+speech** — kNN-VC beats it for free. Use it for singing, and train it properly.
+
+`docs/SINGING.md` covers the training cost, the one setting that decides whether
+the melody survives, and live conversion into a virtual microphone.
+
+On CPU, budget roughly 4× real time for separation and 1–2× for conversion.
 
 ### Measure on your own data
 
@@ -240,7 +252,9 @@ One folder per speaker. VoxCeleb, LibriSpeech, Common Voice grouped by
 `client_id`, or your own recordings.
 
 `docs/FEASIBILITY.md` goes through what each part of the system can and cannot
-deliver, and why.
+deliver, and why. `docs/SINGING.md` covers singing, so-vits-svc and live
+conversion — including the one part of this project whose numbers are *not*
+measured here, and why.
 
 ---
 
@@ -257,6 +271,7 @@ voxprint/
   scoring.py        identification, verification, threshold calibration
   synth/            imitation backends (knnvc, openvoice, freevc, dspvc, xtts)
   song.py           separate a vocal, re-voice it, mix it back
+  svc.py            so-vits-svc: train a model per voice, for singing
   augment.py        noise, reverb, channel -- for realistic calibration
   watermark.py      provenance marking of generated audio
   pipeline.py       VoiceLab -- the API the CLI is built on
@@ -300,6 +315,7 @@ voxprint backends    # shows what is installed and what each thing costs
 | `knnvc` | speech → speech | neural extras | **best identity transfer**; improves with more reference audio |
 | `openvoice` | speech → speech | neural extras | MIT-licensed weights, weaker transfer |
 | `freevc` | speech → speech | neural extras | 24 kHz output, weakest transfer of the three |
+| `sovits` | speech/singing → same | neural extras + **training** | for songs: conditions on pitch, so the melody survives |
 | `dspvc` | speech → speech | nothing | timbre transfer only, but instant and offline |
 | `xtts` | text → speech | neural extras, ~2 GB | 17 languages including Arabic; ~1.4× real time on CPU; **non-commercial licence** |
 | `yourtts` | text → speech | neural extras | lighter, lower fidelity, en/fr/pt |
@@ -343,7 +359,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-257 tests, about 85 seconds, no network access and no downloads — all test audio is
+278 tests, about 90 seconds, no network access and no downloads — all test audio is
 generated (the three that pull a 2 GB checkpoint are opt-in and skip by default). Several of them pin the claims in this README: measured accuracy, the
 watermark's detection margin *and* its documented failure under telephone
 bandwidth, the fact that robust calibration lowers the threshold without lowering

@@ -21,7 +21,7 @@ import numpy as np
 from .encoders.base import EncoderSpec, average_embeddings, l2_normalize
 from .normalization import EmbeddingStandardizer, load_default_reference
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,63}$")
 
 
@@ -97,6 +97,10 @@ class VoicePrint:
     total_seconds: float = 0.0
     sources: list[str] = field(default_factory=list)
     notes: str = ""
+    #: Trained per-speaker models, keyed by backend name. Zero-shot converters
+    #: need nothing here; so-vits-svc needs a model trained on this voice, and
+    #: the voice print is the natural place to record where it lives.
+    models: dict[str, str] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -149,6 +153,7 @@ class VoicePrint:
             "utterances": self.n_utterances,
             "total_seconds": round(self.total_seconds, 2),
             "cohesion": None if np.isnan(coh) else round(coh, 4),
+            "models": sorted(self.models),
             "warnings": warnings,
         }
 
@@ -160,6 +165,7 @@ class VoicePrint:
             "total_seconds": self.total_seconds,
             "sources": list(self.sources),
             "notes": self.notes,
+            "models": dict(self.models),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -414,6 +420,8 @@ class Gallery:
                     total_seconds=float(entry.get("total_seconds", 0.0)),
                     sources=list(entry.get("sources", [])),
                     notes=entry.get("notes", ""),
+                    # Absent before schema 3.
+                    models=dict(entry.get("models", {})),
                     created_at=entry.get("created_at", _now()),
                     updated_at=entry.get("updated_at", _now()),
                 )

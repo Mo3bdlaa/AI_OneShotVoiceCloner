@@ -159,6 +159,8 @@ def cmd_list(args) -> int:
             f"  {entry['speaker_id']:<20} {entry['utterances']:>3} takes  "
             f"{entry['total_seconds']:>6.1f}s  cohesion {coh}  [{consent}]"
         )
+        if entry.get("models"):
+            lines.append(f"      trained models: {', '.join(entry['models'])}")
         for w in entry["warnings"]:
             lines.append(f"      ! {w}")
     _emit(payload, args.json, lines)
@@ -250,7 +252,21 @@ def cmd_revoice(args) -> int:
     from .song import revoice_song
 
     lab = _lab(args)
-    synth = get_synth(args.backend)
+    if args.backend == "sovits":
+        from .svc import workspace_for
+
+        if not args.id:
+            raise ValueError("--backend sovits needs --id: the trained model belongs to a speaker")
+        workspace = workspace_for(lab, args.id)
+        if workspace is None:
+            raise ValueError(
+                f"no so-vits-svc model registered for {args.id!r}. It is not zero-shot -- "
+                f"train one first:\n    voxprint train-svc --id {args.id} --audio-dir <recordings>"
+            )
+        synth = get_synth("sovits", workspace=workspace, transpose=args.transpose,
+                          auto_predict_f0=args.auto_predict_f0)
+    else:
+        synth = get_synth(args.backend)
     ready, reason = synth.available()
     if not ready:
         raise RuntimeError(f"backend {args.backend!r} is not usable: {reason}")
@@ -301,10 +317,97 @@ def cmd_revoice(args) -> int:
                 "to judge this meaningfully."
             )
         del _load
-    if not args.no_separate:
-        lines.append("  singing is out of domain for every zero-shot converter here; expect artefacts")
+    if not args.no_separate and args.backend != "sovits":
+        lines.append(
+            "  singing is out of domain for every zero-shot converter; for a song train a "
+            "so-vits-svc model (`voxprint train-svc`) and use --backend sovits"
+        )
     _emit(payload, args.json, lines)
     return 0
+
+
+def cmd_train_svc(args) -> int:
+    """Train a so-vits-svc model for an enrolled speaker."""
+    from .svc import available as svc_available
+    from .svc import train_for_speaker
+
+    ready, reason = svc_available()
+    if not ready:
+        raise RuntimeError(f"so-vits-svc is not usable: {reason}")
+
+    lab = _lab(args)
+    report = train_for_speaker(
+        lab,
+        args.id,
+        args.audio_dir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        skip_training=args.prepare_only,
+        timeout=args.timeout,
+    )
+    info = report.as_dict()
+    lines = [
+        f"{'prepared' if args.prepare_only else 'trained'} a so-vits-svc model for {args.id}",
+        f"  workspace        {info['workspace']}",
+        f"  training audio   {info['minutes_of_audio']:.1f} minutes",
+        f"  config           {info['config']}",
+    ]
+    if info["checkpoint"]:
+        lines.append(f"  checkpoint       {info['checkpoint']}")
+        lines.append(f"  registered on {args.id}'s voice print; use `revoice --backend sovits`")
+    else:
+        lines.append("  training skipped (--prepare-only); run again without it to train")
+    for warning in info["warnings"]:
+        lines.append(f"  ! {warning}")
+    lines.append("  singing needs the melody preserved, so conversion leaves auto-predict-f0 off")
+    _emit(info, args.json, lines)
+    return 0
+
+
+def cmd_realtime(args) -> int:
+    """Check readiness for live conversion, and print the command that starts it."""
+    from .svc import realtime_command, realtime_readiness, workspace_for
+
+    lab = _lab(args)
+    workspace = workspace_for(lab, args.id) if args.id else None
+    report = realtime_readiness(workspace)
+
+    lines = [f"platform: {report['platform']}", ""]
+    for key, label in (("toolchain", "so-vits-svc"), ("audio", "audio devices"), ("model", "trained model")):
+        block = report[key]
+        lines.append(f"  [{'ok' if block['ready'] else '--'}] {label:<15} {block['detail']}")
+
+    if report["audio"]["devices"]:
+        lines.append("")
+        lines.append("  devices:")
+        for d in report["audio"]["devices"]:
+            kind = "in" if d["inputs"] and not d["outputs"] else "out" if d["outputs"] and not d["inputs"] else "i/o"
+            lines.append(f"    {d['index']:>2}  [{kind}]  {d['name']}")
+
+    lines.append("")
+    lines.append("  routing the result to other applications as a microphone:")
+    lines.extend("    " + line for line in report["virtual_mic"].splitlines())
+
+    payload = dict(report)
+    if report["ready"]:
+        command = realtime_command(
+            workspace,
+            input_device=args.input_device,
+            output_device=args.output_device,
+            transpose=args.transpose,
+            block_seconds=args.block_seconds,
+        )
+        payload["command"] = command
+        lines.append("")
+        lines.append("  start it with:")
+        lines.append("    " + " ".join(command))
+        lines.append(f"  latency is about {args.block_seconds:.2f}s of buffering plus inference time;")
+        lines.append("  add --passthrough to measure the buffering alone. On CPU this will not keep up.")
+    else:
+        lines.append("")
+        lines.append("  not ready: fix the items marked [--] above")
+    _emit(payload, args.json, lines)
+    return 0 if report["ready"] else 1
 
 
 def cmd_speak(args) -> int:
@@ -554,9 +657,37 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the input is already an isolated vocal; skip source separation")
     p.add_argument("--vocal-gain-db", type=float, default=0.0,
                    help="level of the new vocal against the backing track")
+    p.add_argument("--transpose", type=int, default=0,
+                   help="sovits only: shift the key in semitones when the ranges do not match")
+    p.add_argument("--auto-predict-f0", action="store_true",
+                   help="sovits only: let the model re-predict pitch. Good for speech, ruins a melody")
     p.add_argument("--demucs-model", default="htdemucs")
     p.add_argument("--no-watermark", action="store_true")
     p.set_defaults(func=cmd_revoice)
+
+    p = sub.add_parser(
+        "train-svc",
+        help="train a so-vits-svc model for a speaker (for singing; needs ~10 min of audio and a GPU)",
+    )
+    p.add_argument("--id", required=True, help="an enrolled speaker, with a consent record")
+    p.add_argument("--audio-dir", required=True, help="directory of clean solo recordings of that voice")
+    p.add_argument("--epochs", type=int, help="override the config's epoch budget")
+    p.add_argument("--batch-size", type=int, help="lower this if you run out of memory")
+    p.add_argument("--prepare-only", action="store_true", help="preprocess and write the config, do not train")
+    p.add_argument("--timeout", type=float, help="give up after this many seconds")
+    p.set_defaults(func=cmd_train_svc)
+
+    p = sub.add_parser(
+        "realtime",
+        help="check readiness for live microphone conversion and print the command to start it",
+    )
+    p.add_argument("--id", help="the speaker whose trained model to use")
+    p.add_argument("--input-device", type=int, help="audio input device index")
+    p.add_argument("--output-device", type=int, help="audio output device index; point this at a virtual cable")
+    p.add_argument("--transpose", type=int, default=0)
+    p.add_argument("--block-seconds", type=float, default=0.35,
+                   help="buffer size; lower is less latency, higher is fewer dropouts")
+    p.set_defaults(func=cmd_realtime)
 
     p = sub.add_parser("speak", help="synthesise text in a target voice (needs a neural backend)")
     p.add_argument("text")

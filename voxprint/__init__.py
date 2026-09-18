@@ -33,6 +33,7 @@ from .normalization import EmbeddingStandardizer
 from .pipeline import EnrollmentReport, VoiceLab
 from .scoring import CalibrationResult, IdentifyResult, VerifyResult, calibrate, identify, verify
 from .song import revoice_song, separate
+from .svc import SvcWorkspace, train_for_speaker
 from .synth import available_synths, get_synth
 from .watermark import detect_watermark, embed_watermark
 
@@ -48,6 +49,7 @@ __all__ = [
     "GalleryError",
     "IdentifyResult",
     "SpeakerEncoder",
+    "SvcWorkspace",
     "VerifyResult",
     "VoiceLab",
     "VoicePrint",
@@ -63,6 +65,7 @@ __all__ = [
     "revoice_song",
     "save_audio",
     "separate",
+    "train_for_speaker",
     "verify",
     "__version__",
 ]

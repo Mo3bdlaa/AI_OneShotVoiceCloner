@@ -21,5 +21,11 @@ transformers>=4.43,<5
 # its backing track. An isolated vocal needs none of this.
 demucs>=4.0
 
+# Singing voice conversion (`--backend sovits`) and live microphone conversion.
+# Not zero-shot: it trains a model per voice. See docs/SINGING.md.
+# Note: 4.2.x calls np.fromstring, which current NumPy removed; voxprint patches
+# it at runtime (voxprint/_svc_compat.py) rather than pinning NumPy back.
+so-vits-svc-fork>=4.2
+
 # CPU-only PyTorch is a much smaller download and is what this runs on anyway:
 #   pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
