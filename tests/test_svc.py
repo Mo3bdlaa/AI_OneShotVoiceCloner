@@ -231,3 +231,97 @@ def test_compat_shim_replaces_the_removed_numpy_call():
     assert image.ndim == 3
     assert image.shape[2] == 4
     assert image.dtype == np.uint8
+
+
+# --------------------------------------------------------------------------- #
+# The backend, wired through the gallery
+# --------------------------------------------------------------------------- #
+
+def test_sovits_backend_reports_why_it_cannot_run():
+    """Its precondition is a trained model, and it must name that, not fail vaguely."""
+    from voxprint.synth import get_synth
+
+    backend = get_synth("sovits")
+    ready, reason = backend.available()
+    assert not ready
+    assert "trained" in reason
+
+    info = backend.describe()
+    assert info["capabilities"] == ["vc"]
+    assert "train" in info["notes"].lower()
+
+
+def test_sovits_backend_refuses_to_convert_without_a_model():
+    import numpy as np
+
+    from voxprint.synth import get_synth
+
+    with pytest.raises(RuntimeError, match="not usable"):
+        get_synth("sovits").convert(np.zeros(SR, dtype=np.float32), np.zeros(SR, dtype=np.float32), SR)
+
+
+def test_revoice_explains_that_sovits_needs_training(tmp_path, clips, capsys):
+    """The CLI must point at `train-svc`, not just report a missing backend."""
+    from voxprint.cli import main
+
+    root = str(tmp_path / "voices")
+    main(["--root", root, "enroll", clips["omar"][0], "--id", "omar",
+          "--consent", "synthetic voice"])
+    capsys.readouterr()
+
+    code = main(["--root", root, "revoice", clips["hana"][0], "--id", "omar",
+                 "--backend", "sovits", "--no-separate", "-o", str(tmp_path / "out.wav")])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "not zero-shot" in err
+    assert "train-svc" in err
+
+
+def test_revoice_with_sovits_requires_a_speaker(tmp_path, clips, capsys):
+    from voxprint.cli import main
+
+    code = main(["--root", str(tmp_path / "voices"), "revoice", clips["omar"][0],
+                 "--backend", "sovits", "--no-separate", "-o", str(tmp_path / "out.wav")])
+    assert code == 1
+    assert "--id" in capsys.readouterr().err
+
+
+def test_realtime_command_reports_missing_prerequisites(tmp_path, capsys):
+    from voxprint.cli import main
+
+    code = main(["--root", str(tmp_path / "voices"), "realtime"])
+    out = capsys.readouterr().out
+    assert code == 1, "not ready must be a non-zero exit"
+    assert "trained model" in out
+    assert "microphone" in out.lower()
+
+
+def test_preprocess_is_skipped_for_an_already_prepared_workspace(workspace, monkeypatch):
+    """Re-running training must not redo the HuBERT pass over every file."""
+    workspace.config_path.parent.mkdir(parents=True)
+    workspace.config_path.write_text("{}")
+    features = workspace.root / "dataset" / "44k" / "omar"
+    features.mkdir(parents=True)
+    (features / "take.wav.f0.npy").write_bytes(b"x")
+
+    def fail(*args, **kwargs):
+        raise AssertionError("preprocessing should have been skipped")
+
+    monkeypatch.setattr(svc, "_run", fail)
+    assert "skipped" in svc.preprocess(workspace)
+
+
+def test_staging_clears_the_previous_dataset(workspace, training_audio):
+    svc.stage_audio(workspace, svc.collect_audio(training_audio))
+    assert len(list(workspace.dataset_raw.glob("*"))) == 4
+
+    svc.stage_audio(workspace, svc.collect_audio(training_audio)[:2])
+    assert len(list(workspace.dataset_raw.glob("*"))) == 2, "stale files would be trained on too"
+
+
+def test_availability_does_not_require_the_console_script(monkeypatch):
+    """Everything runs through `python -m`, so a missing `svc` script is irrelevant."""
+    monkeypatch.setattr(svc.shutil, "which", lambda name: None)
+    ready, reason = svc.available()
+    if ready:
+        assert reason == "installed"

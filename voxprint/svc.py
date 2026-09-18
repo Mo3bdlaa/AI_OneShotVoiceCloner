@@ -61,8 +61,9 @@ def available() -> tuple[bool, str]:
         return False, "so-vits-svc-fork not installed (pip install so-vits-svc-fork)"
     except ImportError as exc:
         return False, f"so-vits-svc-fork is installed but will not import: {exc}"
-    if shutil.which("svc") is None and not _svc_entrypoint().exists():
-        return False, "so-vits-svc-fork is installed but its `svc` command was not found"
+    # Deliberately *not* checking for the `svc` console script: everything here
+    # runs `python -m voxprint._svc_compat`, which needs the package importable
+    # and nothing else. Requiring the script would refuse an install that works.
     return True, "installed"
 
 
@@ -71,15 +72,6 @@ def compat_patched() -> bool:
     from ._svc_compat import apply
 
     return apply()
-
-
-def _svc_entrypoint() -> Path:
-    """The ``svc`` script next to the running interpreter.
-
-    Looked up relative to ``sys.executable`` rather than through PATH: inside a
-    virtualenv those differ, and PATH's may belong to a different environment.
-    """
-    return Path(sys.executable).parent / "svc"
 
 
 def _run(args: list[str], cwd: Path, step: str, timeout: float | None = None) -> str:
@@ -145,9 +137,16 @@ class SvcWorkspace:
 
 
 def stage_audio(workspace: SvcWorkspace, paths: list[str | os.PathLike[str]]) -> float:
-    """Copy training audio into the workspace; returns total minutes."""
+    """Copy training audio into the workspace; returns total minutes.
+
+    The destination is cleared first: files are named by their position in the
+    list, so staging a second, shorter set over an older one would otherwise
+    leave the surplus behind and train on both.
+    """
     import soundfile as sf
 
+    if workspace.dataset_raw.exists():
+        shutil.rmtree(workspace.dataset_raw)
     workspace.dataset_raw.mkdir(parents=True, exist_ok=True)
     total = 0.0
     for index, path in enumerate(paths):
@@ -170,14 +169,19 @@ def collect_audio(directory: str | os.PathLike[str]) -> list[Path]:
 # Pipeline
 # --------------------------------------------------------------------------- #
 
-def preprocess(workspace: SvcWorkspace, timeout: float | None = 7200) -> dict:
+def preprocess(workspace: SvcWorkspace, timeout: float | None = 7200, force: bool = False) -> dict:
     """Resample, write the config, and extract HuBERT features and F0.
 
-    The third step downloads a ~360 MB content encoder on first run.
+    The third step downloads a ~360 MB content encoder on first run and is the
+    slow one, so an already-prepared workspace is left alone unless ``force`` is
+    set -- continuing a training run should not re-extract every feature.
     """
     ready, reason = available()
     if not ready:
         raise SvcError(reason)
+
+    if not force and workspace.config_path.exists() and any(workspace.root.glob("dataset/44k/**/*.f0.npy")):
+        return {"skipped": "already preprocessed; pass force=True to redo it"}
 
     steps = {}
     for step, args in (
@@ -358,7 +362,8 @@ def train_for_speaker(
     files = collect_audio(audio_dir)
     if not files:
         raise SvcError(f"no audio found under {audio_dir}")
-    minutes = stage_audio(workspace, files)
+    already_prepared = workspace.config_path.exists()
+    minutes = stage_audio(workspace, files) if not already_prepared else _staged_minutes(workspace)
 
     warnings: list[str] = []
     if minutes < MIN_TRAINING_MINUTES:
@@ -384,6 +389,19 @@ def train_for_speaker(
         budget=budget,
         warnings=warnings,
     )
+
+
+def _staged_minutes(workspace: SvcWorkspace) -> float:
+    """Duration of the audio already staged in a prepared workspace."""
+    import soundfile as sf
+
+    total = 0.0
+    for path in workspace.dataset_raw.glob("*"):
+        try:
+            total += sf.info(str(path)).duration
+        except Exception:  # noqa: BLE001 - a stray file is not worth failing over
+            continue
+    return total / 60.0
 
 
 def register_model(lab, speaker_id: str, workspace: SvcWorkspace) -> None:
