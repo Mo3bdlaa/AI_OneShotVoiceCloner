@@ -17,7 +17,10 @@ audio would measure memorisation.
 Two things this exists to answer:
 
 * Where does the number get to, and where does it stop paying? Training is
-  expensive enough that "more" is not a plan.
+  expensive enough that "more" is not a plan -- and the curve is not monotonic.
+  Measured on one run, the score peaked at +0.549 around 2800 steps and had
+  fallen back to +0.427 by 5075. Pick the checkpoint by measurement, not by
+  taking the last one.
 * Is a trained model worth it at all for your material? Compare the result
   against `voxprint revoice --backend knnvc`, which needs no training. For
   speech, kNN-VC usually wins; the case for so-vits-svc is singing.
@@ -40,6 +43,14 @@ from voxprint.encoders import get_encoder  # noqa: E402
 from voxprint.svc import SvcWorkspace, infer, set_training_budget, train  # noqa: E402
 
 AUDIO_SUFFIXES = {".wav", ".flac", ".ogg", ".mp3", ".m4a"}
+
+
+def _epoch_of(checkpoint: Path | None, fallback: int) -> int:
+    """Read the epoch out of a ``G_<n>.pth`` filename."""
+    if checkpoint is None:
+        return fallback
+    stem = checkpoint.stem.split("_")
+    return int(stem[1]) if len(stem) > 1 and stem[1].isdigit() else fallback
 
 
 def voice_print(encoder, directory: Path, limit: int = 8) -> np.ndarray:
@@ -103,18 +114,29 @@ def main() -> int:
         train(workspace)
         elapsed = time.time() - started
 
-        converted = out_dir / f"epoch{target_epochs:04d}.wav"
+        # Label the point by the checkpoint actually scored, not by the epoch
+        # that was requested. Training can already be past the target -- after a
+        # run that was interrupted between saving and scoring, for instance --
+        # and labelling by intent silently mis-places the point on the curve.
+        checkpoint = workspace.latest_checkpoint()
+        actual = _epoch_of(checkpoint, fallback=target_epochs)
+
+        converted = out_dir / f"epoch{actual:04d}.wav"
         infer(workspace, args.source, converted, auto_predict_f0=False)
         to_target, to_source = score(converted)
         results.append({
-            "epochs": target_epochs,
-            "steps": target_epochs * steps_per_epoch,
+            "requested_epochs": target_epochs,
+            "epochs": actual,
+            "steps": actual * steps_per_epoch,
+            "checkpoint": checkpoint.name if checkpoint else None,
             "to_target": to_target,
             "to_source": to_source,
             "train_seconds": round(elapsed, 1),
         })
-        print(f"epoch {target_epochs:>4} (~{target_epochs * steps_per_epoch:>6} steps)  "
-              f"->target {to_target:+.3f}  ->source {to_source:+.3f}   +{elapsed / 60:.0f} min", flush=True)
+        note = "" if actual == target_epochs else f"  [requested {target_epochs}]"
+        print(f"epoch {actual:>4} (~{actual * steps_per_epoch:>6} steps)  "
+              f"->target {to_target:+.3f}  ->source {to_source:+.3f}   "
+              f"+{elapsed / 60:.0f} min{note}", flush=True)
         Path(args.out).write_text(json.dumps(results, indent=2))
 
     print(f"\nwrote {args.out} and {out_dir}/")
