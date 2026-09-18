@@ -43,9 +43,12 @@ from .watermark import embed_watermark
 
 GALLERY_FILE = "gallery.npz"
 AUDIO_DIR = "audio"
-#: Reference audio kept per speaker for the cloning backends. XTTS needs about
-#: six seconds; more than thirty adds nothing and wastes disk.
-MAX_REFERENCE_SECONDS = 30.0
+#: Reference audio kept per speaker for the cloning and conversion backends.
+#: XTTS needs about six seconds and stops improving there, but kNN-VC matches each
+#: frame against the target's own recordings, so it keeps improving with more.
+#: Measured: 5s of reference converts to +0.53 against the target's voice print,
+#: 10s to +0.65, 20s to +0.73, 40s to +0.78, and it plateaus after that.
+MAX_REFERENCE_SECONDS = 60.0
 
 
 @dataclass

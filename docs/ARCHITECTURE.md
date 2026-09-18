@@ -139,6 +139,20 @@ dependencies. Binds to `127.0.0.1` by default and says so loudly when told to
 bind elsewhere; a voice-print gallery is biometric data and there is no
 authentication. Every endpoint maps to a `VoiceLab` method — no logic lives here.
 
+### `song.py` — separate, convert, remix
+
+A recording with music in it cannot go straight to a converter: it would re-voice
+the drums too. So the vocal comes out (Demucs, invoked as a subprocess through
+`sys.executable` — `python` from PATH is the wrong interpreter inside a
+virtualenv, which cost a debugging round), gets converted alone, and is mixed
+back over the untouched instrumental.
+
+The module is honest about what it is for. The plumbing is verified — separated
+vocal correlating +0.968 with the true vocal and +0.064 with the backing — but
+every converter available here was trained on speech, so a sung input is out of
+domain and the result degrades. Singing-specific systems are not zero-shot; this
+pipeline is the right shape for them, with the converter swapped.
+
 ### `synth/` — two capabilities, not one
 
 Backends declare `capabilities` — `{"tts"}`, `{"vc"}`, or both — so asking a

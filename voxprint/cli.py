@@ -232,12 +232,77 @@ def cmd_convert(args) -> int:
         score = lab.similarity_to(result.wav, result.sample_rate, args.id)
         payload["similarity_to_target"] = round(score, 4)
         lines.append(f"  similarity of the output to the target's voice print: {score:+.3f}")
-        if lab.gallery.threshold is not None:
-            passes = score >= lab.gallery.threshold
+        threshold = lab.gallery.identification_threshold
+        if threshold is not None:
+            passes = score >= threshold
             lines.append(
                 f"  {'would' if passes else 'would NOT'} be recognised as {args.id} "
-                f"(threshold {lab.gallery.threshold:.3f})"
+                f"(threshold {threshold:.3f})"
             )
+    if args.backend == "dspvc":
+        lines.append("  dspvc only transfers timbre; --backend knnvc reaches the target identity")
+    _emit(payload, args.json, lines)
+    return 0
+
+
+def cmd_revoice(args) -> int:
+    """Re-voice a song or recording: keep the words and the music, change the voice."""
+    from .song import revoice_song
+
+    lab = _lab(args)
+    synth = get_synth(args.backend)
+    ready, reason = synth.available()
+    if not ready:
+        raise RuntimeError(f"backend {args.backend!r} is not usable: {reason}")
+
+    reference, ref_sr = lab._resolve_reference(args.id, args.reference, lab.encoder.sample_rate)
+    wav, sr, info = revoice_song(
+        args.file,
+        reference,
+        ref_sr,
+        converter=synth,
+        separate_vocals=not args.no_separate,
+        vocal_gain_db=args.vocal_gain_db,
+        demucs_model=args.demucs_model,
+    )
+    if not args.no_watermark:
+        from .watermark import embed_watermark
+
+        wav = embed_watermark(wav)
+        info["watermarked"] = True
+
+    save_audio(args.out, wav, sr)
+    payload = {"out": args.out, "duration": round(wav.size / sr, 2), **info}
+    lines = [
+        f"wrote {args.out}  ({wav.size / sr:.1f}s @ {sr} Hz)",
+        f"  separation {info['separation']}",
+        f"  converter  {info['backend']}, {info.get('reference_seconds', '?')}s of reference voice",
+    ]
+    if args.id and args.id in lab.gallery:
+        from .audio import load_audio as _load
+
+        score = lab.similarity_to(wav, sr, args.id)
+        payload["similarity_to_target"] = round(score, 4)
+        payload["judged_by"] = lab.encoder.name
+        lines.append(
+            f"  the output scores {score:+.3f} against {args.id}'s voice print, "
+            f"as judged by the {lab.encoder.name} encoder"
+        )
+        threshold = lab.gallery.identification_threshold
+        if threshold is not None:
+            lines.append(
+                f"  it {'would' if score >= threshold else 'would NOT'} be recognised as {args.id} "
+                f"(threshold {threshold:.3f})"
+            )
+        if lab.encoder.name == "dsp":
+            lines.append(
+                "  that verdict is only as good as the encoder giving it: the same conversion "
+                "scored +0.67 under ecapa where dsp gave +0.15. Re-enrol with --encoder ecapa "
+                "to judge this meaningfully."
+            )
+        del _load
+    if not args.no_separate:
+        lines.append("  singing is out of domain for every zero-shot converter here; expect artefacts")
     _emit(payload, args.json, lines)
     return 0
 
@@ -470,9 +535,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--id", help="enrolled target speaker")
     p.add_argument("--reference", help="target voice as an audio file instead")
     p.add_argument("-o", "--out", required=True)
-    p.add_argument("--backend", default="dspvc", choices=available_synths())
+    p.add_argument("--backend", default="dspvc", choices=available_synths(),
+                   help="dspvc needs no download but only transfers timbre; knnvc reaches the target voice")
     p.add_argument("--no-watermark", action="store_true")
     p.set_defaults(func=cmd_convert)
+
+    p = sub.add_parser(
+        "revoice",
+        help="re-voice a song or recording in a target voice (keeps the words, music and timing)",
+    )
+    p.add_argument("file", help="the recording to re-voice; a song, or an isolated vocal")
+    p.add_argument("--id", help="enrolled target speaker")
+    p.add_argument("--reference", help="target voice as an audio file instead")
+    p.add_argument("-o", "--out", required=True)
+    p.add_argument("--backend", default="knnvc", choices=available_synths(),
+                   help="voice converter (default: knnvc, which transfers identity best)")
+    p.add_argument("--no-separate", action="store_true",
+                   help="the input is already an isolated vocal; skip source separation")
+    p.add_argument("--vocal-gain-db", type=float, default=0.0,
+                   help="level of the new vocal against the backing track")
+    p.add_argument("--demucs-model", default="htdemucs")
+    p.add_argument("--no-watermark", action="store_true")
+    p.set_defaults(func=cmd_revoice)
 
     p = sub.add_parser("speak", help="synthesise text in a target voice (needs a neural backend)")
     p.add_argument("text")

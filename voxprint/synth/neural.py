@@ -253,6 +253,140 @@ def _reference_file(wav: np.ndarray, sr: int) -> _ReferenceFile:
     return _ReferenceFile(wav, sr)
 
 
+class CoquiVoiceConverter(VoiceSynthesizer):
+    """Zero-shot any-to-any voice conversion: re-voice a recording, keep the words.
+
+    This is the backend to reach for when you already *have* the audio -- someone
+    singing, reading, talking -- and want it in a different voice. The recording
+    supplies the words, the timing and the performance; only the timbre changes.
+    Unlike text-to-speech cloning it needs no text and no language support, and
+    unlike :class:`voxprint.synth.dspvc.DspVoiceConverter` it is a trained model
+    and actually reaches the target identity.
+
+    Measured on two LibriSpeech speakers, scoring the output against the target's
+    ECAPA voice print (source scored -0.041 to the target and +0.918 to itself
+    before conversion):
+
+    ==============  ==========  ==========  ======
+    model           -> target   -> source   time
+    ==============  ==========  ==========  ======
+    ``knnvc``           +0.645      +0.031     8 s
+    ``openvoice``       +0.401      +0.265     6 s
+    ``freevc``          +0.239      +0.161    33 s
+    ==============  ==========  ==========  ======
+
+    kNN-VC is the default: it moved the identity furthest *and* scrubbed the
+    source identity most completely, in the least time. It works by replacing
+    each frame's self-supervised feature with its nearest neighbours drawn from
+    the target's own recordings, so more reference audio directly means a better
+    match -- unlike encoder-based converters, which compress the reference into
+    one vector and stop improving.
+
+    On singing
+    ----------
+    All of these were trained on speech. They will process a sung recording, but
+    sustained vowels, vibrato and a wider pitch range are out of domain, and the
+    result degrades accordingly. A song also needs its vocal separated from the
+    backing track first -- see :mod:`voxprint.song`. Systems built for singing
+    (RVC, so-vits-svc) reach much higher quality but are not zero-shot: they need
+    roughly ten minutes of the target voice and a training run.
+    """
+
+    name = "knnvc"
+    version = "1"
+    capabilities = frozenset({"vc"})
+    sample_rate = 16_000
+    notes = "Zero-shot voice conversion. Keeps the words and performance, changes the voice."
+
+    DEFAULT_MODEL = "voice_conversion_models/multilingual/multi-dataset/knnvc"
+
+    def __init__(self, model_name: str | None = None, device: str | None = None):
+        self.model_name = model_name or self.DEFAULT_MODEL
+        self._device = device
+        self._model: Any | None = None
+
+    def available(self) -> tuple[bool, str]:
+        try:
+            import TTS  # noqa: F401,PLC0415
+        except ModuleNotFoundError:
+            return False, "coqui TTS not installed (pip install -r requirements-neural.txt)"
+        except ImportError as exc:
+            return False, f"coqui TTS is installed but will not import -- likely a dependency conflict: {exc}"
+        return True, "installed (model downloads on first use)"
+
+    @property
+    def device(self) -> str:
+        if self._device is None:
+            try:
+                import torch  # noqa: PLC0415
+
+                self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                self._device = "cpu"
+        return self._device
+
+    def _load(self):
+        if self._model is not None:
+            return self._model
+        try:
+            from TTS.api import TTS  # noqa: PLC0415
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(f"coqui TTS is not installed.\n{_INSTALL_HINT}") from exc
+        model = TTS(self.model_name)
+        if hasattr(model, "to"):
+            model = model.to(self.device)
+        self._model = model
+        return model
+
+    def convert(
+        self,
+        source: np.ndarray,
+        reference: np.ndarray,
+        sr: int = TARGET_SR,
+        **kwargs,
+    ) -> SynthResult:
+        model = self._load()
+        with _reference_file(source, sr) as source_path, _reference_file(reference, sr) as target_path:
+            wav = model.voice_conversion(source_wav=source_path, target_wav=target_path, **kwargs)
+
+        out = np.asarray(wav, dtype=np.float32).squeeze()
+        return SynthResult(
+            wav=out,
+            sample_rate=self._output_rate(),
+            backend=self.name,
+            info={
+                "model": self.model_name,
+                "device": self.device,
+                "source_seconds": round(float(np.size(source)) / sr, 2),
+                "reference_seconds": round(float(np.size(reference)) / sr, 2),
+            },
+        )
+
+    def _output_rate(self) -> int:
+        try:
+            return int(self._model.voice_converter.output_sample_rate)
+        except Exception:  # pragma: no cover - depends on the model wrapper
+            return self.sample_rate
+
+
+class FreeVcConverter(CoquiVoiceConverter):
+    """FreeVC24 -- 24 kHz output, but measurably weaker identity transfer."""
+
+    name = "freevc"
+    sample_rate = 24_000
+    notes = "24 kHz voice conversion. Cleaner audio than kNN-VC, reaches the target identity less well."
+    DEFAULT_MODEL = "voice_conversion_models/multilingual/vctk/freevc24"
+
+
+class OpenVoiceConverter(CoquiVoiceConverter):
+    """OpenVoice v2 tone-colour converter -- MIT-licensed weights."""
+
+    name = "openvoice"
+    sample_rate = 22_050
+    notes = "Tone-colour conversion, MIT-licensed weights. Between kNN-VC and FreeVC on identity."
+    DEFAULT_MODEL = "voice_conversion_models/multilingual/multi-dataset/openvoice_v2"
+
+
 class YourTtsCloner(CoquiCloner):
     """YourTTS -- smaller and faster than XTTS, fewer languages, lower fidelity."""
 
@@ -267,6 +401,21 @@ class YourTtsCloner(CoquiCloner):
         # YourTTS uses its own language tags and has no speed control.
         kwargs.pop("speed", None)
         return super().synthesize(text, reference, sr, language=language, **kwargs)
+
+
+@register_synth("knnvc")
+def _make_knnvc(**kwargs) -> CoquiVoiceConverter:
+    return CoquiVoiceConverter(**kwargs)
+
+
+@register_synth("freevc")
+def _make_freevc(**kwargs) -> FreeVcConverter:
+    return FreeVcConverter(**kwargs)
+
+
+@register_synth("openvoice")
+def _make_openvoice(**kwargs) -> OpenVoiceConverter:
+    return OpenVoiceConverter(**kwargs)
 
 
 @register_synth("xtts")

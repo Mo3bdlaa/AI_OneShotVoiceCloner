@@ -221,11 +221,44 @@ degree.
 
 ### Voice conversion (speech → speech)
 
-A recording already contains the words, the timing and the prosody. Only the
-timbre has to change. That is tractable with signal processing, and `dspvc` does
-it: shift the median pitch onto the target's using a phase vocoder, then apply the
-difference between the two long-term spectral envelopes as a smooth equalisation
-curve.
+This is the easier half of "cloning", and the one that works best. A recording
+already contains the words, the timing and the prosody; only the timbre has to
+change. There are two very different ways to do it.
+
+**With a trained model.** Zero-shot converters take a few seconds of the target
+and re-voice anything. Measured between two LibriSpeech speakers, scoring the
+output against the target's held-out ECAPA voice print — the source scored −0.041
+to the target and +0.918 to itself before conversion:
+
+| backend | → target | → source | time |
+|---|---|---|---|
+| `knnvc` | **+0.645** | **+0.031** | 8 s |
+| `openvoice` | +0.401 | +0.265 | 6 s |
+| `freevc` | +0.239 | +0.161 | 33 s |
+
+kNN-VC wins on both axes: it reaches the target furthest *and* scrubs the source
+identity most completely. The mechanism explains why — it replaces each frame's
+self-supervised feature with nearest neighbours drawn from the target's own
+recordings, so the output is assembled out of the target's actual acoustics
+rather than steered by a single summary vector. The same mechanism means more
+reference audio keeps helping, where an encoder-based converter saturates:
+
+| reference | 5 s | 10 s | 20 s | 40 s | 49 s |
+|---|---|---|---|---|---|
+| → target | +0.531 | +0.647 | +0.732 | +0.776 | +0.749 |
+
+Twenty to forty seconds is the useful range. `MAX_REFERENCE_SECONDS` in the
+pipeline is 60 for this reason; it was 30 until this was measured.
+
+**The complete loop.** Re-voicing a recording of speaker A toward speaker B with
+47 s of B's audio, then asking the system's own recogniser who is speaking:
+`MATCH: 1988` at +0.617, with the original speaker A at +0.003. The clone passes
+the recogniser. Nothing states the case against voice authentication more
+plainly.
+
+**Without a trained model.** `dspvc` shifts the median pitch onto the target's
+using a phase vocoder, then applies the difference between the two long-term
+spectral envelopes as a smooth equalisation curve.
 
 Measured effect, from the `omar` -> `hana` case in `examples/demo.py` (run it and
 you will get these numbers back):
@@ -240,7 +273,8 @@ you will get these numbers back):
 shows the same pattern: −0.11 before, +0.37 after, still short of the threshold.
 
 So it closes roughly half the gap and does not come close to passing as the
-target.
+target — which is exactly the difference between signal processing and a model
+that has seen thousands of speakers.
 It cannot: rhythm, accent and the small timing gestures that make a voice
 recognisable all belong to the source speaker and stay there, and the formants
 move with the pitch, which is audible on large shifts. The honest description is
@@ -249,6 +283,29 @@ move with the pitch, which is audible on large shifts. The honest description is
 It is still worth having: it runs in real time on a CPU with no model download, it
 gives the pipeline something to exercise end to end, and it is a fair baseline to
 measure a neural backend against.
+
+### Singing
+
+Everything above was measured on speech. Singing is a different problem, and the
+honest answer is that none of the zero-shot backends here handles it well.
+
+Three reasons, all structural. Every converter was trained on speech, so
+sustained vowels, vibrato and a two-octave range are out of domain. A song needs
+its vocal separated from the backing track first, and separation leaves artefacts
+that conversion amplifies. And melody lives in the pitch contour, which
+speech-trained models were never asked to preserve exactly.
+
+The pipeline is in :mod:`voxprint.song` and works mechanically: on a test mix, the
+separated vocal correlated +0.968 with the true vocal and +0.064 with the
+backing, and the re-voiced result scored +0.668 mixed with the instrumental,
++0.700 as a bare vocal. Those numbers come from speech over a backing track, not
+from real singing, and should be read as "the plumbing is correct", not "singing
+works".
+
+What actually does singing well — RVC, so-vits-svc — is **not zero-shot**. It
+needs roughly ten minutes of the target voice and a training run, which is the
+real price of a convincing sung result. `voxprint.song` is the right shape for
+those systems too: swap the converter, keep the separation and the remix.
 
 ### Text-to-speech cloning (text → speech)
 

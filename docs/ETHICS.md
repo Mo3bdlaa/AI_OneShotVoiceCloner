@@ -27,9 +27,15 @@ played back; a stored recording can.
 print and the reference audio in one command. If withdrawing consent is harder
 than granting it, consent was never meaningful.
 
-**Generated audio is marked by default.** Every file produced by `convert` or
-`speak` carries a spread-spectrum watermark, checkable with
+**Generated audio is marked by default.** Every file produced by `convert`,
+`revoice` or `speak` carries a spread-spectrum watermark, checkable with
 `voxprint watermark check`.
+
+**Re-voicing needs the same consent as cloning.** Taking a recording and putting
+someone else's voice on it is the same act as generating speech in their voice:
+the output is audio of a person saying something they did not say. `revoice`
+resolves its target through the same gallery, so the same consent record is
+required, and the same watermark is applied.
 
 **The non-commercial model licence is not accepted for you.** Coqui asks for
 agreement to the CPML on first download, interactively. Answering that prompt on
@@ -66,10 +72,14 @@ a detector.
 **Do not use voice alone to authorise anything that matters.** Not payments, not
 account recovery, not physical access. Reasons, in order of severity:
 
-1. A good neural cloning backend can produce audio that scores above a threshold
-   calibrated on genuine recordings. You can measure this yourself:
-   `voxprint convert --id <speaker>` reports the output's similarity to the target
-   and whether it would pass.
+1. A good neural converter produces audio that scores above a threshold
+   calibrated on genuine recordings. This is measured, not hypothetical: a
+   recording of one speaker, re-voiced toward another with 47 seconds of their
+   audio, scored +0.629 against the target's voice print at a calibrated
+   threshold of 0.554 — and `voxprint identify` returned `MATCH` for the target
+   with the original speaker at +0.003. The system's own recogniser was fooled by
+   the system's own converter. You can reproduce it with `voxprint revoice`,
+   which reports that number on every run.
 2. The reported false-accept rate comes from calibration on enrolment audio. Real
    impostors, rooms and microphones push it higher.
 3. The default encoder degrades sharply under noise and across microphones — see

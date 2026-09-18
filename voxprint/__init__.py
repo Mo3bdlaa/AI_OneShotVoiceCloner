@@ -7,8 +7,9 @@ how well they actually work:
 2. **Recognise** it later, including saying "I don't know this person"
    (:mod:`voxprint.scoring`).
 3. **Imitate** it (:mod:`voxprint.synth`) -- either by re-voicing an existing
-   recording with signal processing, or by generating new speech with an
-   optional pretrained neural model.
+   recording, which keeps the words, timing and performance and changes only the
+   voice, or by generating new speech from text. :mod:`voxprint.song` wraps the
+   first for recordings that still have a backing track.
 
 Steps 1 and 2 run anywhere with NumPy and SciPy. Step 3, done properly, needs a
 model somebody else trained on thousands of hours of speech; see ``docs/FEASIBILITY.md``
@@ -31,6 +32,7 @@ from .gallery import ConsentRecord, Gallery, GalleryError, VoicePrint
 from .normalization import EmbeddingStandardizer
 from .pipeline import EnrollmentReport, VoiceLab
 from .scoring import CalibrationResult, IdentifyResult, VerifyResult, calibrate, identify, verify
+from .song import revoice_song, separate
 from .synth import available_synths, get_synth
 from .watermark import detect_watermark, embed_watermark
 
@@ -58,7 +60,9 @@ __all__ = [
     "get_synth",
     "identify",
     "load_audio",
+    "revoice_song",
     "save_audio",
+    "separate",
     "verify",
     "__version__",
 ]

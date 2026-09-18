@@ -45,6 +45,10 @@ neural = [
     # coqui-tts imports a symbol transformers 5.0 removed; see requirements-neural.txt
     "transformers>=4.43,<5",
 ]
+song = [
+    "voxprint[neural]",
+    "demucs>=4.0",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",

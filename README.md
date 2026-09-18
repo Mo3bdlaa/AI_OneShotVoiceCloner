@@ -9,7 +9,8 @@ well they actually work:
 |---|---|---|
 | **fingerprint** | turn a recording into a fixed-length voice print | works, with real caveats |
 | **recognise** | match a new recording against enrolled speakers, or say "unknown" | works, with real caveats |
-| **imitate** | speak new text in that voice | needs a pretrained model — no signal-processing shortcut exists |
+| **re-voice** | take a recording and change whose voice it is, keeping the words | works well — needs a pretrained model |
+| **speak** | generate new speech from text in that voice | works — needs a pretrained model |
 
 Everything except imitation runs on NumPy and SciPy alone: no model download, no
 GPU, no licence to read. Imitation is an optional backend, because doing it
@@ -61,10 +62,13 @@ voxprint calibrate
 voxprint identify unknown.wav          # exit 0 = match, 2 = unknown
 voxprint verify claim.wav --id omar    # exit 0 = accept, 2 = reject
 
-# 4. imitate
-voxprint convert someone.wav --id omar -o out.wav              # works offline
+# 4a. re-voice an existing recording: keeps the words, timing and performance
+voxprint revoice recording.wav --id omar -o out.wav            # needs the neural extras
+voxprint revoice song.mp3 --id omar -o out.wav                 # splits the vocal off first
+
+# 4b. generate new speech from text
 voxprint speak "مرحبا" --id omar --language ar -o hello.wav \
-    --backend xtts                                             # needs the neural extras
+    --backend xtts
 
 # or drive all of it from a browser, recording straight from the microphone
 voxprint serve
@@ -172,6 +176,60 @@ and a leave-one-speaker-out best-match distribution for identification — and
 2 % to 70 %, at a cost of 9 points of accuracy. Recalibrate after the gallery
 grows: the maximum is over more candidates.
 
+### Re-voicing works, and it beats the recogniser
+
+Give it a recording and a target voice, and it returns the same words in that
+voice. Measured between two LibriSpeech speakers, scoring the output against the
+target's **held-out** ECAPA voice print (the source scored −0.04 to the target
+and +0.92 to itself beforehand):
+
+| backend | → target | → source | time |
+|---|---|---|---|
+| **`knnvc`** (default) | **+0.645** | **+0.031** | 8 s |
+| `openvoice` | +0.401 | +0.265 | 6 s |
+| `freevc` | +0.239 | +0.161 | 33 s |
+| `dspvc` (no download) | — closes about half the gap, never crosses it — | | instant |
+
+kNN-VC matches each frame of the source against the target's own recordings, so
+unlike encoder-based converters it keeps improving with more reference audio:
+
+| reference | 5 s | 10 s | 20 s | 40 s |
+|---|---|---|---|---|
+| → target | +0.531 | +0.647 | +0.732 | +0.776 |
+
+Twenty to forty seconds is the useful range; `voxprint enroll` keeps up to 60 s
+for exactly this. The source identity is gone throughout (+0.02 to +0.04).
+
+**The full loop, end to end.** Taking a recording of speaker A over a backing
+track, re-voicing it toward speaker B with 47 s of B's audio, and then asking the
+system itself who is speaking:
+
+```
+  the output scores +0.629 against 1988's voice print   (threshold 0.554)
+  MATCH: 1988   1. 1988 +0.617   2. 1272 +0.003
+```
+
+The recogniser identifies the re-voiced audio as the target and puts the original
+speaker at +0.003. That is the demonstration, and it is also the reason
+`docs/ETHICS.md` says not to authorise anything with a voice.
+
+### Songs
+
+`voxprint revoice song.mp3` separates the vocal with Demucs, converts it, and
+mixes it back over the untouched instrumental. On the test mix the separated
+vocal correlated +0.968 with the true vocal and +0.064 with the backing, and the
+re-voiced result scored +0.668 mixed, +0.700 as a bare vocal.
+
+**But singing is not speech, and every converter here was trained on speech.**
+Sustained vowels, vibrato and a two-octave range are out of domain; separation
+adds artefacts that conversion then amplifies. Expect a usable result on speech
+and a rough one on singing. Systems built for singing — RVC, so-vits-svc — sound
+far better and are *not* zero-shot: they want ~10 minutes of the target voice and
+a training run. This pipeline is the right shape for those too; swap the
+converter and keep the separation and remix.
+
+On CPU, budget roughly 4× real time for separation and 2× for conversion.
+
 ### Measure on your own data
 
 ```bash
@@ -197,7 +255,8 @@ voxprint/
   normalization.py  the step that makes cosine scoring work at all
   gallery.py        enrolled speakers, consent records, persistence
   scoring.py        identification, verification, threshold calibration
-  synth/            imitation backends (dspvc, xtts, yourtts)
+  synth/            imitation backends (knnvc, openvoice, freevc, dspvc, xtts)
+  song.py           separate a vocal, re-voice it, mix it back
   augment.py        noise, reverb, channel -- for realistic calibration
   watermark.py      provenance marking of generated audio
   pipeline.py       VoiceLab -- the API the CLI is built on
@@ -238,8 +297,11 @@ voxprint backends    # shows what is installed and what each thing costs
 
 | backend | can do | needs | notes |
 |---|---|---|---|
-| `dspvc` | speech → speech | nothing | timbre transfer, not identity cloning |
-| `xtts` | text → speech, speech → speech | neural extras, ~2 GB | 17 languages including Arabic; ~1.4× real time on CPU; **non-commercial licence** |
+| `knnvc` | speech → speech | neural extras | **best identity transfer**; improves with more reference audio |
+| `openvoice` | speech → speech | neural extras | MIT-licensed weights, weaker transfer |
+| `freevc` | speech → speech | neural extras | 24 kHz output, weakest transfer of the three |
+| `dspvc` | speech → speech | nothing | timbre transfer only, but instant and offline |
+| `xtts` | text → speech | neural extras, ~2 GB | 17 languages including Arabic; ~1.4× real time on CPU; **non-commercial licence** |
 | `yourtts` | text → speech | neural extras | lighter, lower fidelity, en/fr/pt |
 
 Both `ecapa` and `xtts` have been run end to end, not just imported — including
@@ -281,7 +343,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-250 tests, about 80 seconds, no network access and no downloads — all test audio is
+257 tests, about 85 seconds, no network access and no downloads — all test audio is
 generated (the three that pull a 2 GB checkpoint are opt-in and skip by default). Several of them pin the claims in this README: measured accuracy, the
 watermark's detection margin *and* its documented failure under telephone
 bandwidth, the fact that robust calibration lowers the threshold without lowering
@@ -292,7 +354,7 @@ The optional backends have their own file, skipped when their dependencies are
 absent:
 
 ```bash
-pip install -r requirements-neural.txt
+pip install -r requirements-neural.txt     # includes demucs, for songs
 COQUI_TOS_AGREED=1 VOXPRINT_TEST_XTTS=1 pytest tests/test_neural_backends.py
 ```
 

@@ -17,5 +17,9 @@ coqui-tts>=0.24
 # then fails at import with a confusing AttributeError.
 transformers>=4.43,<5
 
+# Source separation, needed only by `voxprint revoice` on a song that still has
+# its backing track. An isolated vocal needs none of this.
+demucs>=4.0
+
 # CPU-only PyTorch is a much smaller download and is what this runs on anyway:
 #   pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
