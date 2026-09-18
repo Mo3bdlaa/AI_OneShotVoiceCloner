@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# runtime data
+voices/
+*.npz
+!voxprint/data/*.npz
+out/
+*.wav
+!examples/assets/*.wav
+models/
+.cache/
+.DS_Store

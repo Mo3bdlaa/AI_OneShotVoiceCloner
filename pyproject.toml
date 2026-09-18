@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxprint"
+version = "0.1.0"
+description = "Voice fingerprinting, speaker identification, and one-shot voice imitation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Mohammed Shaker", email = "mo3bdlaa@gmail.com" }]
+keywords = [
+    "speaker-recognition",
+    "speaker-verification",
+    "voice-cloning",
+    "voice-conversion",
+    "speaker-embedding",
+    "audio",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+neural = [
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "speechbrain>=1.0",
+    "coqui-tts>=0.24",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+voxprint = "voxprint.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Mo3bdlaa/AI_OneShotVoiceCloner"
+Issues = "https://github.com/Mo3bdlaa/AI_OneShotVoiceCloner/issues"
+
+[tool.setuptools.packages.find]
+include = ["voxprint*"]
+
+[tool.setuptools.package-data]
+voxprint = ["data/*.npz"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::RuntimeWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E731"]

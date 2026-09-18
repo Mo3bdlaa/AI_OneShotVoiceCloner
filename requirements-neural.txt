@@ -1,0 +1,13 @@
+# Optional backends. Large downloads; install only if you need them.
+#
+#   voxprint --encoder ecapa ...     accurate neural speaker embeddings
+#   voxprint speak ... --backend xtts    zero-shot text-to-speech cloning
+#
+# Licence note: the XTTS-v2 checkpoint is distributed under the Coqui Public
+# Model License (non-commercial). Check the licence of any model you download.
+-r requirements.txt
+
+torch>=2.0
+torchaudio>=2.0
+speechbrain>=1.0
+coqui-tts>=0.24
