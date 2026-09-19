@@ -644,9 +644,12 @@ async function refresh() {
     api("/api/status"), api("/api/speakers"), api("/api/backends"),
   ]);
   backendInfo = backends;
-  const thr = status.threshold === null ? "not calibrated" : status.threshold.toFixed(3);
+  // Both thresholds, because they differ and identify uses the second one --
+  // showing only the verification threshold next to an identify button misleads.
+  const fmt = (v) => (v === null || v === undefined ? "not calibrated" : v.toFixed(3));
   $("status").textContent =
-    `${status.speakers} speaker(s) · encoder ${status.encoder.name} (${status.encoder.dim} dims) · threshold ${thr}`;
+    `${status.speakers} speaker(s) · encoder ${status.encoder.name} (${status.encoder.dim} dims)` +
+    ` · verify ${fmt(status.threshold)} · identify ${fmt(status.identification_threshold)}`;
 
   const sel = $("backend");
   if (!sel.options.length) {
