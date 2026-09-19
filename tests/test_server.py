@@ -22,8 +22,9 @@ from voxprint.server import PAGE, _Api, _Handler
 
 
 @pytest.fixture
-def server(tmp_path, clips):
+def server(tmp_path, clips, request):
     lab = VoiceLab(tmp_path / "voices", require_consent=True)
+    request.node.lab = lab                 # tests that need to poke at the gallery
     handler = type("BoundHandler", (_Handler,), {"api": _Api(lab)})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -236,3 +237,74 @@ def test_calibrate_response_is_strict_json_and_flags_unusability(server):
     assert payload["eer"] is None
     assert payload["warnings"]
     assert get_json(base, "/api/status")["threshold"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Backend selection and background training
+# --------------------------------------------------------------------------- #
+
+def test_backends_endpoint_reports_readiness(server):
+    base, _ = server
+    payload = get_json(base, "/api/backends")
+    names = {b["name"] for b in payload["backends"]}
+    assert {"dspvc", "knnvc", "sovits"} <= names
+    assert all("ready" in b and "capabilities" in b for b in payload["backends"])
+    assert "ready" in payload["training"]
+
+    dspvc = next(b for b in payload["backends"] if b["name"] == "dspvc")
+    assert dspvc["ready"] is True, "the offline converter must always be usable"
+
+
+def test_convert_accepts_a_backend_choice(server):
+    base, clips = server
+    for name in ("omar", "hana"):
+        post(base, "/api/enroll", {"speaker_id": name, "consent": "agreed"},
+             {"audio": ("a.wav", audio_bytes(clips[name][0]))})
+
+    status, body, headers = post(
+        base, "/api/convert", {"speaker_id": "hana", "backend": "dspvc"},
+        {"audio": ("s.wav", audio_bytes(clips["omar"][0]))},
+    )
+    assert status == 200
+    assert json.loads(headers["X-Voxprint-Info"])["backend"] == "dspvc"
+
+
+def test_jobs_endpoint_starts_empty(server):
+    base, _ = server
+    assert get_json(base, "/api/jobs") == []
+
+
+def test_training_refuses_without_consent(server, clips, request):
+    base, _ = server
+    post(base, "/api/enroll", {"speaker_id": "omar", "consent": "agreed"},
+         {"audio": ("a.wav", audio_bytes(clips["omar"][0]))})
+    # strip the consent the way a --no-consent-check enrolment would leave it
+    request.node.lab.gallery.get("omar").consent = None
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        post(base, "/api/train", {"speaker_id": "omar"},
+             {"audio": ("a.wav", audio_bytes(clips["omar"][0]))})
+    assert exc.value.code == 400
+    assert "consent" in json.loads(exc.value.read())["error"]
+
+
+def test_training_needs_audio(server, clips):
+    base, _ = server
+    post(base, "/api/enroll", {"speaker_id": "omar", "consent": "agreed"},
+         {"audio": ("a.wav", audio_bytes(clips["omar"][0]))})
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        post(base, "/api/train", {"speaker_id": "omar"})
+    assert exc.value.code == 400
+    assert "training audio" in json.loads(exc.value.read())["error"]
+
+
+def test_multipart_keeps_every_file_sharing_a_field_name():
+    """Training uploads a folder: the parser must not keep only the last file."""
+    from voxprint.server import _parse_multipart
+
+    body, content_type = _multipart({"speaker_id": "omar"},
+                                    {"audio": ("a.wav", b"RIFFone"), "audio2": ("b.wav", b"RIFFtwo")})
+    fields, files = _parse_multipart(content_type, body)
+    assert fields["speaker_id"] == "omar"
+    assert len(files) == 2
+    assert {bytes(v) for v in files.values()} == {b"RIFFone", b"RIFFtwo"}

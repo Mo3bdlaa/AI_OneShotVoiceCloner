@@ -4,6 +4,45 @@ Two questions this document answers: can a song be re-voiced convincingly, and
 can the conversion run live into a virtual microphone. Both are yes, with
 conditions worth understanding before you spend an afternoon on either.
 
+## Can you skip training entirely?
+
+For speech, yes — and you should. For singing, no, and the reason is measurable.
+
+Singing lives in the pitch contour, so the question is not "does it sound like
+the target" but "does the tune survive". Rendering a 15-note melody, converting
+it with each zero-shot backend, and comparing the output's F0 contour against the
+input's (semitone error is the median absolute deviation after removing the
+constant transposition -- a melody moved up an octave is still the melody):
+
+| backend | melody correlation | semitone error | identity reached |
+|---|---|---|---|
+| the source itself | 1.000 | 0.00 | — |
+| `knnvc` | 0.061 | 3.28 | **+0.70** |
+| `freevc` | −0.336 | 2.13 | +0.24 |
+| `openvoice` | −0.165 | 10.87 | +0.40 |
+| **`dspvc`** | 0.281 | **0.23** | weak |
+
+The neural zero-shot converters do not carry a tune. kNN-VC's contour is
+uncorrelated with the input's and off by over three semitones; FreeVC and
+OpenVoice are *negatively* correlated. They re-voice each frame from the target's
+own acoustics, and the pitch comes with it.
+
+The one that does preserve the melody is the least sophisticated: `dspvc` shifts
+F0 by a constant ratio and leaves the contour alone, so its semitone error is
+0.23 -- an order of magnitude better than any neural backend. What it cannot do
+is reach the target's identity.
+
+So, zero-shot, **you can have the identity or the melody, not both**:
+
+| | speech | singing |
+|---|---|---|
+| no training | `knnvc` — the best option there is | identity without the tune, or the tune without the identity |
+| with training | not worth it | `sovits` — the only one that gives both |
+
+(One caveat on the table: the correlation column is noisy — it is sensitive to a
+few outlier frames, which is why `dspvc` scores low on it while its median
+semitone error says the contour is intact. Read the semitone column.)
+
 ## Why the zero-shot converters are not enough
 
 `voxprint revoice` with `knnvc` moves speech to a target voice well — measured at

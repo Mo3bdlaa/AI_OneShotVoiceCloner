@@ -23,7 +23,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import tempfile
 import threading
+import time
+import uuid
+from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default as email_default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,7 +39,11 @@ from .gallery import ConsentRecord, GalleryError
 from .pipeline import VoiceLab
 from .watermark import detect_watermark
 
-MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+MAX_UPLOAD_BYTES = 512 * 1024 * 1024   # a training set is a folder, not a clip
+
+
+def _safe(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
 
 
 def json_default(obj):
@@ -57,12 +66,45 @@ def json_default(obj):
     raise TypeError(f"not JSON serialisable: {type(obj)!r}")
 
 
+@dataclass
+class _Job:
+    """A long-running task the browser polls rather than waits for.
+
+    Training takes hours. An HTTP request cannot hold that open, and a progress
+    bar that lies is worse than none, so the work runs on a thread and the page
+    asks how it is going.
+    """
+
+    id: str
+    kind: str
+    speaker: str
+    state: str = "running"          # running | done | failed
+    started: float = field(default_factory=time.time)
+    finished: float | None = None
+    detail: str = ""
+    result: dict | None = None
+    error: str | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "speaker": self.speaker,
+            "state": self.state,
+            "seconds": round((self.finished or time.time()) - self.started, 1),
+            "detail": self.detail,
+            "result": self.result,
+            "error": self.error,
+        }
+
+
 class _Api:
     """Thread-safe façade over one VoiceLab."""
 
     def __init__(self, lab: VoiceLab):
         self.lab = lab
         self._lock = threading.Lock()
+        self._jobs: dict[str, _Job] = {}
 
     # -- endpoints --------------------------------------------------------- #
 
@@ -102,17 +144,21 @@ class _Api:
             finally:
                 os.remove(path)
 
-    def convert(self, audio: bytes, speaker_id: str) -> tuple[bytes, dict]:
+    def convert(self, audio: bytes, speaker_id: str, backend: str = "dspvc") -> tuple[bytes, dict]:
         with self._lock:
             src = self._stash(audio, "convert")
             try:
-                result = self.lab.convert_file(src, speaker_id=speaker_id)
+                result = self.lab.convert_file(src, speaker_id=speaker_id, backend=backend)
                 out = self._stash(b"", "converted")
                 save_audio(out, result.wav, result.sample_rate)
                 with open(out, "rb") as fh:
                     data = fh.read()
                 os.remove(out)
                 info = dict(result.info)
+                # Name the backend that produced this: the caller chose one, and
+                # a silent fallback would otherwise be indistinguishable.
+                info["backend"] = result.backend
+                info["sample_rate"] = result.sample_rate
                 if speaker_id in self.lab.gallery:
                     info["similarity_to_target"] = round(
                         self.lab.similarity_to(result.wav, result.sample_rate, speaker_id), 4
@@ -130,6 +176,75 @@ class _Api:
         with self._lock:
             self.lab.remove(speaker_id)
             return {"removed": speaker_id}
+
+    # -- long-running jobs -------------------------------------------------- #
+
+    def jobs(self) -> list[dict]:
+        with self._lock:
+            return [j.as_dict() for j in sorted(self._jobs.values(), key=lambda j: -j.started)]
+
+    def backends(self) -> dict:
+        """What each conversion backend can do right now, and what it needs."""
+        from .svc import available as svc_available
+        from .synth import available_synths, get_synth
+
+        out = []
+        for name in available_synths():
+            try:
+                backend = get_synth(name)
+                ready, reason = backend.available()
+                info = {"name": name, "ready": ready, "status": reason,
+                        "capabilities": sorted(backend.capabilities), "notes": backend.notes}
+            except Exception as exc:
+                info = {"name": name, "ready": False, "status": str(exc),
+                        "capabilities": [], "notes": ""}
+            out.append(info)
+        svc_ready, svc_reason = svc_available()
+        return {"backends": out, "training": {"ready": svc_ready, "status": svc_reason}}
+
+    def train(self, speaker_id: str, clips: list[bytes], epochs: int | None) -> dict:
+        """Start a so-vits-svc training run for a speaker, in the background."""
+        from .svc import MIN_TRAINING_MINUTES, train_for_speaker
+
+        with self._lock:
+            print_ = self.lab.gallery.get(speaker_id)       # raises if unknown
+            if self.lab.gallery.require_consent and print_.consent is None:
+                raise ValueError(
+                    f"{speaker_id} has no consent record. A trained model can generate unlimited "
+                    "audio in this voice; record consent before training one."
+                )
+            if any(j.state == "running" for j in self._jobs.values()):
+                raise ValueError("a training run is already in progress")
+
+        directory = tempfile.mkdtemp(prefix=f"voxprint_train_{_safe(speaker_id)}_")
+        for index, data in enumerate(clips):
+            with open(os.path.join(directory, f"{index:04d}.wav"), "wb") as fh:
+                fh.write(data)
+
+        job = _Job(id=uuid.uuid4().hex[:12], kind="train-svc", speaker=speaker_id,
+                   detail=f"{len(clips)} clip(s) staged; preprocessing")
+
+        def run() -> None:
+            try:
+                report = train_for_speaker(self.lab, speaker_id, directory, epochs=epochs)
+                job.result = report.as_dict()
+                job.state = "done"
+                job.detail = (
+                    f"trained on {report.minutes_of_audio:.1f} min"
+                    + (f"; below the {MIN_TRAINING_MINUTES:.0f} min this wants"
+                       if report.minutes_of_audio < MIN_TRAINING_MINUTES else "")
+                )
+            except Exception as exc:
+                job.state = "failed"
+                job.error = f"{type(exc).__name__}: {exc}"
+            finally:
+                job.finished = time.time()
+                shutil.rmtree(directory, ignore_errors=True)
+
+        with self._lock:
+            self._jobs[job.id] = job
+        threading.Thread(target=run, daemon=True, name=f"train-{job.id}").start()
+        return job.as_dict()
 
     def watermark(self, audio: bytes) -> dict:
         path = self._stash(audio, "watermark")
@@ -211,6 +326,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(self.api.status())
             if route == "/api/speakers":
                 return self._json(self.api.speakers())
+            if route == "/api/backends":
+                return self._json(self.api.backends())
+            if route == "/api/jobs":
+                return self._json(self.api.jobs())
             return self._json({"error": "not found"}, 404)
         except Exception as exc:
             return self._json({"error": str(exc)}, 500)
@@ -236,8 +355,18 @@ class _Handler(BaseHTTPRequestHandler):
             if route == "/api/identify":
                 return self._json(self.api.identify(_require(files, "audio")))
             if route == "/api/convert":
-                data, info = self.api.convert(_require(files, "audio"), _require(fields, "speaker_id"))
+                data, info = self.api.convert(
+                    _require(files, "audio"),
+                    _require(fields, "speaker_id"),
+                    fields.get("backend") or "dspvc",
+                )
                 return self._audio(data, info)
+            if route == "/api/train":
+                clips = [v for k, v in files.items() if k.startswith("audio")]
+                if not clips:
+                    raise ValueError("no training audio supplied")
+                epochs = int(fields["epochs"]) if fields.get("epochs") else None
+                return self._json(self.api.train(_require(fields, "speaker_id"), clips, epochs))
             if route == "/api/watermark":
                 return self._json(self.api.watermark(_require(files, "audio")))
             if route == "/api/calibrate":
@@ -275,7 +404,11 @@ def _parse_multipart(content_type: str, body: bytes) -> tuple[dict[str, str], di
         name = match.group(1)
         payload = part.get_payload(decode=True) or b""
         if "filename=" in disposition:
-            files[name] = payload
+            # Several files can share one field name -- training takes a whole
+            # folder of clips. Later ones are suffixed rather than overwriting,
+            # and the train route collects every key starting with its name.
+            key = name if name not in files else f"{name}{len(files)}"
+            files[key] = payload
         else:
             fields[name] = payload.decode("utf-8", errors="replace").strip()
     return fields, files
@@ -419,11 +552,34 @@ PAGE = """<!doctype html>
   <h2>5 · convert toward a voice</h2>
   <label for="target">target speaker</label>
   <select id="target"></select>
+  <label for="backend">converter</label>
+  <select id="backend"></select>
+  <p class="note" id="backendNote"></p>
   <div class="row"><button id="doConv">convert</button></div>
   <audio id="convAudio" controls hidden></audio>
   <pre id="convOut" hidden></pre>
-  <p class="note">Signal-processing conversion moves timbre, not identity. The result
-     reports how close it actually got to the target's voice print.</p>
+  <p class="note">The result reports how close the output actually got to the target's
+     voice print, judged by the gallery's own encoder.</p>
+</section>
+
+<section>
+  <h2>6 · train a singing model</h2>
+  <p class="note" id="trainStatus">checking…</p>
+  <label for="trainTarget">speaker</label>
+  <select id="trainTarget"></select>
+  <label for="trainFiles">recordings of that voice — ten minutes or more, clean and solo</label>
+  <input type="file" id="trainFiles" accept="audio/*" multiple>
+  <label for="epochs">epochs (blank uses the config default)</label>
+  <input id="epochs" type="number" min="1" placeholder="e.g. 100">
+  <div class="row"><button id="doTrain">start training</button></div>
+  <pre id="trainOut" hidden></pre>
+  <p class="note">
+    Only needed for <strong>singing</strong>. For speech the zero-shot converters are
+    better and need no training at all — measured, kNN-VC reached +0.70 against the
+    target's voice print where a trained so-vits-svc model peaked at +0.55 after
+    6.5 hours. Training runs in the background; this page polls it. On a CPU it takes
+    hours and the result will not be worth using — that part wants a GPU.
+  </p>
 </section>
 </div>
 
@@ -481,15 +637,41 @@ $("rec").onclick = async () => {
   }
 };
 
+let backendInfo = null;
+
 async function refresh() {
-  const [status, speakers] = await Promise.all([api("/api/status"), api("/api/speakers")]);
+  const [status, speakers, backends] = await Promise.all([
+    api("/api/status"), api("/api/speakers"), api("/api/backends"),
+  ]);
+  backendInfo = backends;
   const thr = status.threshold === null ? "not calibrated" : status.threshold.toFixed(3);
   $("status").textContent =
     `${status.speakers} speaker(s) · encoder ${status.encoder.name} (${status.encoder.dim} dims) · threshold ${thr}`;
 
+  const sel = $("backend");
+  if (!sel.options.length) {
+    for (const b of backends.backends.filter((b) => b.capabilities.includes("vc"))) {
+      const opt = document.createElement("option");
+      opt.value = b.name;
+      opt.textContent = b.ready ? b.name : `${b.name} (unavailable)`;
+      opt.disabled = !b.ready;
+      sel.appendChild(opt);
+    }
+    if ([...sel.options].some((o) => o.value === "knnvc" && !o.disabled)) sel.value = "knnvc";
+    sel.onchange = showBackendNote;
+  }
+  showBackendNote();
+
+  const t = backends.training;
+  $("trainStatus").innerHTML = t.ready
+    ? "so-vits-svc is installed."
+    : `<span class="warn">unavailable: ${t.status}</span>`;
+  $("doTrain").disabled = !t.ready;
+
   const body = $("table").querySelector("tbody");
   body.innerHTML = "";
   $("target").innerHTML = "";
+  $("trainTarget").innerHTML = "";
   for (const s of speakers) {
     const tr = document.createElement("tr");
     const consent = s.has_consent
@@ -499,9 +681,11 @@ async function refresh() {
       `<td>${s.total_seconds.toFixed(1)}</td><td>${s.cohesion ?? "—"}</td><td>${consent}</td>` +
       `<td><button data-rm="${s.speaker_id}">delete</button></td>`;
     body.appendChild(tr);
-    const opt = document.createElement("option");
-    opt.value = opt.textContent = s.speaker_id;
-    $("target").appendChild(opt);
+    for (const id of ["target", "trainTarget"]) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = s.speaker_id;
+      $(id).appendChild(opt);
+    }
   }
   body.querySelectorAll("[data-rm]").forEach((b) => {
     b.onclick = async () => {
@@ -535,14 +719,51 @@ wire("doCalRobust", async () => { show($("calOut"), JSON.stringify(await api("/a
 
 wire("doConv", async () => {
   const { blob, info } = await api("/api/convert", {
-    method: "POST", body: form({ speaker_id: $("target").value }),
+    method: "POST",
+    body: form({ speaker_id: $("target").value, backend: $("backend").value }),
   });
   $("convAudio").src = URL.createObjectURL(blob);
   $("convAudio").hidden = false;
   show($("convOut"), JSON.stringify(info, null, 2));
 });
 
+function showBackendNote() {
+  if (!backendInfo) return;
+  const b = backendInfo.backends.find((x) => x.name === $("backend").value);
+  $("backendNote").textContent = b ? (b.ready ? b.notes : b.status) : "";
+}
+
+wire("doTrain", async () => {
+  const files = $("trainFiles").files;
+  if (!files.length) throw new Error("choose the recordings to train on");
+  const fd = new FormData();
+  fd.append("speaker_id", $("trainTarget").value);
+  if ($("epochs").value) fd.append("epochs", $("epochs").value);
+  for (const f of files) fd.append("audio", f, f.name);
+
+  const job = await api("/api/train", { method: "POST", body: fd });
+  show($("trainOut"), JSON.stringify(job, null, 2));
+  pollJobs();
+});
+
+let polling = null;
+async function pollJobs() {
+  if (polling) return;
+  polling = setInterval(async () => {
+    let jobs;
+    try { jobs = await api("/api/jobs"); } catch { return; }
+    const running = jobs.filter((j) => j.state === "running");
+    if (jobs.length) show($("trainOut"), JSON.stringify(jobs.slice(0, 3), null, 2));
+    if (!running.length) {
+      clearInterval(polling);
+      polling = null;
+      refresh();
+    }
+  }, 5000);
+}
+
 refresh();
+pollJobs();
 </script>
 </body>
 </html>

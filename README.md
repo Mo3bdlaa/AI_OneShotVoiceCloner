@@ -228,8 +228,15 @@ vocal correlated +0.968 with the true vocal and +0.064 with the backing, and the
 re-voiced result scored +0.668 mixed, +0.700 as a bare vocal.
 
 **But singing is not speech, and the zero-shot converters were trained on
-speech.** Sustained vowels, vibrato and a two-octave range are out of domain;
-separation adds artefacts that conversion then amplifies.
+speech.** Measured on a 15-note melody, comparing the output's pitch contour
+against the input's: `knnvc` is off by 3.3 semitones and uncorrelated with the
+tune, `freevc` and `openvoice` are *negatively* correlated. They re-voice each
+frame out of the target's acoustics and the pitch comes along with it. The only
+zero-shot backend that keeps the melody is `dspvc`, at 0.23 semitones — because
+it shifts pitch by a constant ratio and never touches the contour — and it cannot
+reach the target's identity.
+
+Zero-shot, then, you can have **the identity or the melody, not both**.
 
 For singing there is `--backend sovits`, which conditions on pitch explicitly and
 so keeps the melody — at the cost of not being zero-shot:
@@ -349,10 +356,14 @@ from different encoders rather than silently comparing incomparable vectors.
 voxprint serve        # http://127.0.0.1:8000
 ```
 
-Record from the microphone, enrol, calibrate, identify, convert, check a
-watermark. Binds to localhost by default — the gallery is biometric data and the
-server has no authentication, so exposing it is a decision you have to make
-explicitly with `--host`.
+Record from the microphone, enrol, calibrate, identify, convert with any
+installed backend, check a watermark, and train a singing model. Training runs in
+the background and the page polls it, because it takes hours and an HTTP request
+cannot hold that open.
+
+Binds to localhost by default — the gallery is biometric data and the server has
+no authentication, so exposing it is a decision you have to make explicitly with
+`--host`.
 
 ## Consent and provenance
 
@@ -373,7 +384,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-278 tests, about 90 seconds, no network access and no downloads — all test audio is
+292 tests, about 100 seconds, no network access and no downloads — all test audio is
 generated (the three that pull a 2 GB checkpoint are opt-in and skip by default). Several of them pin the claims in this README: measured accuracy, the
 watermark's detection margin *and* its documented failure under telephone
 bandwidth, the fact that robust calibration lowers the threshold without lowering
